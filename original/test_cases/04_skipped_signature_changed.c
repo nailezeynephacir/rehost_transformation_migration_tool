@@ -1,0 +1,6 @@
+int scale_value(int value)
+{
+    int result = value * 2;
+
+    return result;
+}
