@@ -49,13 +49,9 @@ EXTRACTION_REPORT_FILE = (
 def read_source_file(file_path: Path) -> str:
     # Read one source file as UTF-8 text.
     if not file_path.exists():
-        raise FileNotFoundError(
-            f"Source file was not found: {file_path}"
-        )
+        raise FileNotFoundError(f"Source file was not found: {file_path}")
 
-    return file_path.read_text(
-        encoding="utf-8"
-    )
+    return file_path.read_text(encoding="utf-8")
 
 def find_source_files(source_directory: Path) -> Dict[str, Path]:
     # Find supported C and C++ files recursively.
@@ -80,10 +76,7 @@ def find_source_files(source_directory: Path) -> Dict[str, Path]:
         if not file_path.is_file():
             continue
 
-        if (
-            file_path.suffix.lower()
-            not in SUPPORTED_SOURCE_EXTENSIONS
-        ):
+        if (file_path.suffix.lower()not in SUPPORTED_SOURCE_EXTENSIONS):
             continue
 
         relative_file_path = (
@@ -92,9 +85,7 @@ def find_source_files(source_directory: Path) -> Dict[str, Path]:
             ).as_posix()
         )
 
-        source_files[
-            relative_file_path
-        ] = file_path
+        source_files[relative_file_path] = file_path
 
     return source_files
 
@@ -175,6 +166,131 @@ def get_original_search_regions(
         f"Unsupported scope: {block['scope']}"
     )
 
+def select_matching_original_branch(
+    block: Dict[str, Any],
+    search_regions: List[Dict[str, Any]]
+) -> Tuple[
+    Optional[Dict[str, Any]],
+    Optional[str]
+]:
+    # Determine which conditional branch came from the old original file.
+    #
+    # The parser only knows the physical branch positions:
+    # - original_branch: branch before #else
+    # - alternative_branch: branch after #else
+    #
+    # Therefore, both branches are searched in the old original source.
+    branch_candidates = [
+        {
+            "name": "first branch",
+            "text": block.get(
+                "original_branch"
+            ),
+        },
+        {
+            "name": "else branch",
+            "text": block.get(
+                "alternative_branch"
+            ),
+        },
+    ]
+
+    branch_results = []
+
+    for candidate in branch_candidates:
+        branch_text = candidate["text"]
+
+        # A missing or empty branch cannot represent
+        # code from the old original file.
+        if (
+            not isinstance(branch_text, str)
+            or not normalize_code_text(
+                branch_text
+            )
+        ):
+            occurrence_count = 0
+
+        else:
+            occurrence_count = (
+                count_normalized_occurrences(
+                    search_regions,
+                    branch_text
+                )
+            )
+
+        branch_results.append(
+            {
+                "name": candidate["name"],
+                "text": branch_text,
+                "occurrence_count": (
+                    occurrence_count
+                ),
+            }
+        )
+
+    unique_matches = [
+        result
+        for result in branch_results
+        if result["occurrence_count"] == 1
+    ]
+
+    found_matches = [
+        result
+        for result in branch_results
+        if result["occurrence_count"] > 0
+    ]
+
+    # Safe case:
+    # One branch occurs exactly once and the other does not occur.
+    if (
+        len(unique_matches) == 1
+        and len(found_matches) == 1
+    ):
+        selected_match = unique_matches[0]
+
+        selected_block = dict(
+            block
+        )
+
+        # build_transformation() expects the matched old-original
+        # code under the original_branch key.
+        selected_block[
+            "original_branch"
+        ] = selected_match["text"]
+
+        return selected_block, None
+
+    result_details = ", ".join(
+        (
+            f"{result['name']}: "
+            f"{result['occurrence_count']} match(es)"
+        )
+        for result in branch_results
+    )
+
+    if not found_matches:
+        return (
+            None,
+            "Neither conditional branch was found as one "
+            "continuous block in the expected scope. "
+            f"Results: {result_details}."
+        )
+
+    if len(found_matches) > 1:
+        return (
+            None,
+            "More than one conditional branch was found "
+            "in the old original source, so the original "
+            "branch is ambiguous. "
+            f"Results: {result_details}."
+        )
+
+    return (
+        None,
+        "The matching conditional branch was found more "
+        "than once, so the match is ambiguous. "
+        f"Results: {result_details}."
+    )
 
 def build_transformation(
     transformation_number: int,
@@ -287,20 +403,20 @@ def extract_transformations(
 
     for block in conditional_blocks:
         # The first version supports only blocks containing #else.
-        if not block["has_else"]:
-            report_entries.append(
-                build_report_entry(
-                    relative_file_path,
-                    block,
-                    result="SKIPPED",
-                    reason=(
-                        "The conditional block does not "
-                        "contain an #else branch."
-                    )
-                )
-            )
+        # if not block["has_else"]:
+        #     report_entries.append(
+        #         build_report_entry(
+        #             relative_file_path,
+        #             block,
+        #             result="SKIPPED",
+        #             reason=(
+        #                 "The conditional block does not "
+        #                 "contain an #else branch."
+        #             )
+        #         )
+        #     )
 
-            continue
+        #     continue
 
         # Multiple alternative branches are not supported yet.
         if block["contains_elif"]:
@@ -340,26 +456,6 @@ def extract_transformations(
 
             continue
 
-        original_branch = block[
-            "original_branch"
-        ]
-
-        if not normalize_code_text(
-            original_branch
-        ):
-            report_entries.append(
-                build_report_entry(
-                    relative_file_path,
-                    block,
-                    result="SKIPPED",
-                    reason=(
-                        "The original branch is empty."
-                    )
-                )
-            )
-
-            continue
-
         search_regions, search_error = (
             get_original_search_regions(
                 block,
@@ -383,39 +479,24 @@ def extract_transformations(
             )
 
             continue
-
-        occurrence_count = (
-            count_normalized_occurrences(
-                search_regions,
-                original_branch
-            )
+        (
+            selected_block,
+            branch_selection_error
+        ) = select_matching_original_branch(
+            block,
+            search_regions
         )
 
-        if occurrence_count == 0:
+        if selected_block is None:
             report_entries.append(
                 build_report_entry(
                     relative_file_path,
                     block,
                     result="SKIPPED",
                     reason=(
-                        "The original branch was not found "
-                        "in the expected scope."
-                    )
-                )
-            )
-
-            continue
-
-        if occurrence_count > 1:
-            report_entries.append(
-                build_report_entry(
-                    relative_file_path,
-                    block,
-                    result="SKIPPED",
-                    reason=(
-                        "The original branch was found "
-                        f"{occurrence_count} times. "
-                        "The match is ambiguous."
+                        branch_selection_error
+                        or "The original branch could "
+                           "not be identified."
                     )
                 )
             )
@@ -423,9 +504,14 @@ def extract_transformations(
             continue
 
         transformation = build_transformation(
-            transformation_number = (starting_transformation_number + len(transformations)),
-            relative_file_path = (relative_file_path),
-            block=block
+            transformation_number=(
+                starting_transformation_number
+                + len(transformations)
+            ),
+            relative_file_path=(
+                relative_file_path
+            ),
+            block=selected_block
         )
 
         transformations.append(
@@ -435,11 +521,11 @@ def extract_transformations(
         report_entries.append(
             build_report_entry(
                 relative_file_path,
-                block,
+                selected_block,
                 result="CREATED",
                 reason=(
-                    "The original branch was found once "
-                    "in the expected scope."
+                    "Exactly one conditional branch was "
+                    "found once in the expected scope."
                 ),
                 transformation_id=(
                     transformation["id"]
