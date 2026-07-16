@@ -104,7 +104,6 @@ def build_transformation_search_regions(source_text: str, transformation: Dict[s
     )
 
 
-
 def get_transformation_function_name(transformation: Dict[str, Any]) -> Optional[str]:
     # Return the expected function name for function-scope transformations.
     function_information = transformation.get("function")
@@ -119,6 +118,35 @@ def get_transformation_function_name(transformation: Dict[str, Any]) -> Optional
 
     return function_name
 
+## ----- This were added for occurence > 1, still do it case -----
+
+def match_is_inside_replacement(match: Dict[str, Any], replacement_matches: List[Dict[str, Any]]) -> bool:
+    # An original-code match may be located inside an already-applied conditional replacement. 
+    # Ignore it to prevent nested conditionals.
+    return any(replacement_match["start"] <= match["start"] and match["end"] <= replacement_match["end"] for replacement_match in replacement_matches)
+
+
+def matches_overlap(matches: List[Dict[str, Any]]) -> bool:
+    # Multiple matches are safe only when their source ranges do not overlap.
+    ordered_matches = sorted(matches, key=lambda match: match["start"])
+
+    for previous_match, current_match in zip(ordered_matches, ordered_matches[1:]):
+        if current_match["start"] < previous_match["end"]:
+            return True
+
+    return False
+
+
+def apply_replacement_to_matches(source_text: str, matches: List[Dict[str, Any]], replacement: str) -> str:
+    # Apply replacements from right to left.
+    # This prevents earlier character positions from changing.
+    updated_source = source_text
+
+    for match in sorted(matches, key=lambda item: item["start"],reverse=True):
+        updated_source = (updated_source[:match["start"]] + replacement + updated_source[match["end"]:])
+
+    return updated_source
+## ----------------------------------------------------------------
 
 def apply_single_transformation(source_text: str,transformation: Dict[str, Any]) -> Tuple[str, Dict[str, Any]]:
     # Apply one transformation only when exactly one safe match exists.
@@ -136,10 +164,11 @@ def apply_single_transformation(source_text: str,transformation: Dict[str, Any])
             "match",
             ""
         ),
-        "result": "SKIPPED",
-        "reason": "",
         "match_count": 0,
+        "replacement_match_count": 0,
+        "applied_count": 0,
         "parser_warnings": parser_warnings,
+        "ranges": [],
         "start": None,
         "end": None,
     }
@@ -161,54 +190,132 @@ def apply_single_transformation(source_text: str,transformation: Dict[str, Any])
 
     # Check the full replacement before looking for the original code.
     # This makes repeated application idempotent and prevents nested conditional blocks from being generated.
+    # replacement_matches = find_matches_in_regions(source_text, regions, replacement)
+
+    # if len(replacement_matches) == 1:
+    #     result.update(
+    #         {
+    #             "result": "ALREADY_APPLIED",
+    #             "reason": ("The complete replacement is already present in the required scope."),
+    #             "match_count": 1,
+    #             "start": replacement_matches[0]["start"],
+    #             "end": replacement_matches[0]["end"],
+    #         }
+    #     )
+    #     return source_text, result
+
+    # if len(replacement_matches) > 1:
+    #     result["reason"] = ("The complete replacement was found more than once in the required scope. The existing code is ambiguous.")
+    #     result["match_count"] = len(replacement_matches)
+    #     return source_text, result
+
+    # matches = find_matches_in_regions(
+    #     source_text,
+    #     regions,
+    #     transformation.get("match", "")
+    # )
+
+    # result["match_count"] = len(matches)
+
+    # if len(matches) == 0:
+    #     result["reason"] = ("The expected code was not found in the required scope.")
+    #     return source_text, result
+
+    # if len(matches) > 1:
+    #     result["reason"] = ("The expected code was found more than once in the required scope. The match is ambiguous.")
+    #     return source_text, result
+
+    # match = matches[0]
+
+    # match_start = match["start"]
+    # match_end = match["end"]
+
+    # updated_source = (source_text[:match_start] + replacement + source_text[match_end:])
+
+    # result.update(
+    #     {
+    #         "result": "APPLIED",
+    #         "reason": ("The expected code was found exactly once in the required scope."),
+    #         "start": match_start,
+    #         "end": match_end,
+    #     }
+    # )
+
+    # return updated_source, result
+    # First locate complete replacements that already exist.
     replacement_matches = find_matches_in_regions(source_text, regions, replacement)
 
-    if len(replacement_matches) == 1:
-        result.update(
-            {
-                "result": "ALREADY_APPLIED",
-                "reason": ("The complete replacement is already present in the required scope."),
-                "match_count": 1,
-                "start": replacement_matches[0]["start"],
-                "end": replacement_matches[0]["end"],
-            }
-        )
+    result["replacement_match_count"] = len(replacement_matches)
+
+    # Then locate every occurrence of the old original code.
+    original_matches = find_matches_in_regions(source_text, regions, transformation.get("match", ""))
+
+    # The original branch also exists inside a complete conditional block.
+    # Exclude such matches to avoid creating nested #ifdef blocks.
+    matches_to_apply = [
+        match
+        for match in original_matches
+        if not match_is_inside_replacement(match,replacement_matches)
+    ]
+
+    result["match_count"] = len(matches_to_apply)
+
+    if not matches_to_apply:
+        if replacement_matches:
+            result.update(
+                {
+                    "result": "ALREADY_APPLIED",
+                    "reason": ("No untransformed matches remain in the required scope. "
+                         f"The complete replacement is already present {len(replacement_matches)} time(s)."
+                    ),
+                    "ranges": [
+                        {
+                            "start": match["start"],
+                            "end": match["end"],
+                        }
+                        for match in replacement_matches
+                    ],
+                }
+            )
+
+        else:
+            result["reason"] = ("The expected code was not found in the required scope.")
+
         return source_text, result
 
-    if len(replacement_matches) > 1:
-        result["reason"] = ("The complete replacement was found more than once in the required scope. The existing code is ambiguous.")
-        result["match_count"] = len(replacement_matches)
+    # Multiple automatic replacements are currently allowed only
+    # inside one verified function.
+    if (len(matches_to_apply) > 1 and transformation.get("scope") != "function"):
+        result["reason"] = ("The expected code was found more than once outside function scope. The match is ambiguous.")
         return source_text, result
 
-    matches = find_matches_in_regions(
-        source_text,
-        regions,
-        transformation.get("match", "")
-    )
-
-    result["match_count"] = len(matches)
-
-    if len(matches) == 0:
-        result["reason"] = ("The expected code was not found in the required scope.")
+    if matches_overlap(matches_to_apply):
+        result["reason"] = ("The expected code produced overlapping matches, so the transformation was not applied.")
         return source_text, result
 
-    if len(matches) > 1:
-        result["reason"] = ("The expected code was found more than once in the required scope. The match is ambiguous.")
-        return source_text, result
+    updated_source = apply_replacement_to_matches(source_text,matches_to_apply,replacement)
 
-    match = matches[0]
-
-    match_start = match["start"]
-    match_end = match["end"]
-
-    updated_source = (source_text[:match_start] + replacement + source_text[match_end:])
+    applied_ranges = [
+        {
+            "start": match["start"],
+            "end": match["end"],
+        }
+        for match in matches_to_apply
+    ]
 
     result.update(
         {
             "result": "APPLIED",
-            "reason": ("The expected code was found exactly once in the required scope."),
-            "start": match_start,
-            "end": match_end,
+            "reason": (
+                "The expected code was found "
+                f"{len(matches_to_apply)} time(s) "
+                "in the required scope. "
+                "All matches were transformed."
+            ),
+            "applied_count": len(matches_to_apply),
+            "ranges": applied_ranges,
+            "start": matches_to_apply[0]["start"],
+            "end": matches_to_apply[-1]["end"],
         }
     )
 
@@ -339,6 +446,67 @@ def resolve_project_file(project_directory: Path, relative_file_path: str) -> Tu
 
     return resolved_file, None
 
+def apply_support_files_to_project(output_directory: Path, support_files: List[Dict[str, str]]) -> List[Dict[str, str]]:
+    # Create rehost-only support files from the content stored in JSON.
+    # Existing files copied from new_original are not overwritten.
+    support_file_results = []
+
+    for support_file in support_files:
+        relative_file_path = normalize_relative_file_path(support_file["path"])
+
+        content = support_file["content"]
+
+        output_file, path_error = resolve_project_file(output_directory, relative_file_path)
+
+        if output_file is None:
+            support_file_results.append(
+                {
+                    "result": "SKIPPED",
+                    "file": relative_file_path,
+                    "reason": (path_error or "The support file path is invalid."),
+                }
+            )
+            continue
+
+        # new_original is copied before support files are created.
+        # Therefore, an existing path belongs to new_original and should not be overwritten silently.
+        if output_file.exists():
+            support_file_results.append(
+                {
+                    "result": "SKIPPED",
+                    "file": relative_file_path,
+                    "reason": ("A file with the same path already exists in new_original, so it was not overwritten."),
+                }
+            )
+            continue
+
+        try:
+            # Support files may be inside nested directories.
+            output_file.parent.mkdir(parents=True, exist_ok=True)
+
+            # write_bytes preserves the line endings stored in the JSON.
+            output_file.write_bytes(content.encode("utf-8"))
+
+        except (OSError, UnicodeEncodeError) as error:
+            support_file_results.append(
+                {
+                    "result": "SKIPPED",
+                    "file": relative_file_path,
+                    "reason": (f"The support file could not be created: {error}"),
+                }
+            )
+            continue
+
+        support_file_results.append(
+            {
+                "result": "CREATED",
+                "file": relative_file_path,
+                "reason": ("The support file was created from the content stored in the transformation JSON."),
+            }
+        )
+
+    return support_file_results
+
 
 def apply_transformations_to_source(source_text: str, transformations: List[Dict[str, Any]]) -> Tuple[str,List[Dict[str, Any]]]:
     # Apply transformations in their JSON order.
@@ -368,7 +536,10 @@ def build_file_skip_result(transformation: Dict[str, Any],reason: str) -> Dict[s
         "result": "SKIPPED",
         "reason": reason,
         "match_count": 0,
+        "replacement_match_count": 0,
+        "applied_count": 0,
         "parser_warnings": [],
+        "ranges": [],
         "start": None,
         "end": None,
     }
@@ -472,20 +643,23 @@ def save_application_report(application_results: List[Dict[str, Any]], transform
         if function_name is not None:
             report_lines.append(f"Function: {function_name}")
 
-        report_lines.extend(
-            [
-                (f"Normalized match count: {result['match_count']}"),
-                f"Reason: {result['reason']}"
-            ]
-        )
+        if result["result"] == "APPLIED":
+            report_lines.append(f"Applied occurrence count: {result.get('applied_count', 0)}")
+
+            applied_ranges = result.get("ranges", [])
+
+            for range_number, character_range in enumerate(applied_ranges, start=1):
+                report_lines.append(
+                    "Original character range "
+                    f"{range_number}: "
+                    f"{character_range['start']}:"
+                    f"{character_range['end']}"
+                )
+
+            report_lines.append("")
 
         if result["result"] == "APPLIED":
-            report_lines.extend(
-                [
-                    (f"Original character range: {result['start']}:{result['end']}"),
-                    ""
-                ]
-            )
+            report_lines.extend([(f"Original character range: {result['start']}:{result['end']}"), ""])
 
         else:
             expected_match = str(result.get("expected_match", ""))
@@ -514,6 +688,8 @@ def main() -> None:
     transformations, support_files = load_transformations(TRANSFORMATIONS_FILE)
 
     prepare_generated_project(source_directory=NEW_ORIGINAL_DIR, output_directory=GENERATED_REHOST_DIR)
+
+    support_file_results = apply_support_files_to_project(output_directory=GENERATED_REHOST_DIR, support_files=support_files)
 
     application_results = (apply_transformations_to_project(output_directory=(GENERATED_REHOST_DIR), transformations=transformations))
 
