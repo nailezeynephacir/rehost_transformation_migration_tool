@@ -690,7 +690,8 @@ def main() -> None:
     prepare_generated_project(source_directory=NEW_ORIGINAL_DIR, output_directory=GENERATED_REHOST_DIR)
 
     support_file_results = apply_support_files_to_project(output_directory=GENERATED_REHOST_DIR, support_files=support_files)
-
+    # not written in report - UPDATE
+    
     application_results = (apply_transformations_to_project(output_directory=(GENERATED_REHOST_DIR), transformations=transformations))
 
     grouped_transformations = (group_transformations_by_file(transformations))
