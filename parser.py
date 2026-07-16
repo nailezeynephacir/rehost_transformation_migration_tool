@@ -167,6 +167,20 @@ def mask_comments(
         mask_literals=False
     )
 
+def normalize_function_signature(
+    signature: str
+) -> str:
+    # Ignore comments and whitespace while comparing function signatures.
+    signature_without_comments = mask_comments(
+        signature
+    )
+
+    return re.sub(
+        r"\s+",
+        " ",
+        signature_without_comments
+    ).strip()
+
 
 def extract_function_name(
     signature: str
@@ -321,11 +335,11 @@ def find_function_regions(
                     signature_start:index
                 ]
 
-                normalized_signature = re.sub(
-                    r"\s+",
-                    " ",
-                    signature
-                ).strip()
+                normalized_signature = (
+                    normalize_function_signature(
+                        signature
+                    )
+                )
 
                 function_name = (
                     extract_function_name(
