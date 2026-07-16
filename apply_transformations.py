@@ -4,131 +4,68 @@ import shutil
 from typing import Any, Dict, List, Optional, Tuple
 
 from parser import parse_source
-from transformation_matching import (
-    build_non_function_regions,
-    find_matches_in_regions,
-    find_matching_function,
-)
+from transformation_matching import build_non_function_regions, find_matches_in_regions, find_matching_function
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 
-TRANSFORMATIONS_FILE = (
-    PROJECT_ROOT
-    / "rehost_transformations.json"
-)
+TRANSFORMATIONS_FILE = (PROJECT_ROOT / "rehost_transformations.json")
 
-NEW_ORIGINAL_DIR = (
-    PROJECT_ROOT
-    / "new_original"
-)
+NEW_ORIGINAL_DIR = (PROJECT_ROOT / "new_original")
 
-GENERATED_REHOST_DIR = (
-    PROJECT_ROOT
-    / "generated_rehost"
-)
+GENERATED_REHOST_DIR = (PROJECT_ROOT / "generated_rehost")
 
-APPLICATION_REPORT_FILE = (
-    PROJECT_ROOT
-    / "application_report.txt"
-)
+APPLICATION_REPORT_FILE = (PROJECT_ROOT / "application_report.txt")
 
-def prepare_generated_project(
-    source_directory: Path,
-    output_directory: Path
-) -> None:
+
+def prepare_generated_project(source_directory: Path, output_directory: Path) -> None:
     # Create a fresh generated project from new_original.
-    #
     # Files without transformations are copied without modification.
+
     if not source_directory.exists():
-        raise FileNotFoundError(
-            "New original directory was not found: "
-            f"{source_directory}"
-        )
+        raise FileNotFoundError("New original directory was not found: " f"{source_directory}")
 
     if not source_directory.is_dir():
-        raise NotADirectoryError(
-            "New original path is not a directory: "
-            f"{source_directory}"
-        )
+        raise NotADirectoryError("New original path is not a directory: " f"{source_directory}")
 
-    if (
-        source_directory.resolve()
-        == output_directory.resolve()
-    ):
-        raise ValueError(
-            "The input and output directories must be different."
-        )
+    if (source_directory.resolve() == output_directory.resolve()):
+        raise ValueError("The input and output directories must be different.")
 
     if output_directory.exists():
-        shutil.rmtree(
-            output_directory
-        )
+        shutil.rmtree(output_directory) # deletes the directory
 
-    shutil.copytree(
-        source_directory,
-        output_directory
-    )
+    shutil.copytree(source_directory, output_directory)
 
-def build_transformation_search_regions(
-    source_text: str,
-    transformation: Dict[str, Any]
-) -> Tuple[
-    List[Dict[str, Any]],
-    Optional[str],
-    List[str]
-]:
+
+def build_transformation_search_regions(source_text: str, transformation: Dict[str, Any]) -> Tuple[List[Dict[str, Any]], Optional[str], List[str]]:
     # Build only the source regions allowed by the transformation scope.
-    parse_result = parse_source(
-        source_text
-    )
+    parse_result = parse_source(source_text)
 
     functions = parse_result["functions"]
     parser_warnings = parse_result["warnings"]
 
-    scope = transformation.get(
-        "scope"
-    )
+    scope = transformation.get("scope")
 
     if scope == "function":
-        function_information = transformation.get(
-            "function"
-        )
+        function_information = transformation.get("function") 
 
-        if not isinstance(
-            function_information,
-            dict
-        ):
+        if not isinstance(function_information, dict):
             return (
                 [],
-                "Function information is missing from "
-                "the transformation.",
+                "Function information is missing from the transformation.",
                 parser_warnings
             )
 
-        function_name = function_information.get(
-            "name"
-        )
+        function_name = function_information.get("name")
+        function_signature = function_information.get("signature")
 
-        function_signature = function_information.get(
-            "signature"
-        )
-
-        if (
-            not function_name
-            or not function_signature
-        ):
+        if (not function_name or not function_signature):
             return (
                 [],
-                "Function name or signature is missing "
-                "from the transformation.",
+                "Function name or signature is missing from the transformation.",
                 parser_warnings
             )
 
-        matching_function, error = find_matching_function(
-            functions,
-            function_name,
-            function_signature
-        )
+        matching_function, error = find_matching_function(functions, function_name, function_signature)
 
         if matching_function is None:
             return (
@@ -138,24 +75,15 @@ def build_transformation_search_regions(
             )
 
         # Search only inside the function body.
-        body_start = (
-            matching_function["body_start"]
-            + 1
-        )
-
-        body_end = (
-            matching_function["body_end"]
-            - 1
-        )
+        body_start = (matching_function["body_start"] + 1)
+        body_end = (matching_function["body_end"] - 1)
 
         return (
             [
                 {
                     "start": body_start,
                     "end": body_end,
-                    "text": source_text[
-                        body_start:body_end
-                    ],
+                    "text": source_text[body_start:body_end],
                 }
             ],
             None,
@@ -164,10 +92,7 @@ def build_transformation_search_regions(
 
     if scope in {"include", "global"}:
         return (
-            build_non_function_regions(
-                source_text,
-                functions
-            ),
+            build_non_function_regions(source_text, functions),
             None,
             parser_warnings
         )
@@ -180,23 +105,14 @@ def build_transformation_search_regions(
 
 
 
-def get_transformation_function_name(
-    transformation: Dict[str, Any]
-) -> Optional[str]:
+def get_transformation_function_name(transformation: Dict[str, Any]) -> Optional[str]:
     # Return the expected function name for function-scope transformations.
-    function_information = transformation.get(
-        "function"
-    )
+    function_information = transformation.get("function")
 
-    if not isinstance(
-        function_information,
-        dict
-    ):
+    if not isinstance(function_information,dict):
         return None
 
-    function_name = function_information.get(
-        "name"
-    )
+    function_name = function_information.get("name")
 
     if not isinstance(function_name, str):
         return None
@@ -204,39 +120,18 @@ def get_transformation_function_name(
     return function_name
 
 
-def apply_single_transformation(
-    source_text: str,
-    transformation: Dict[str, Any]
-) -> Tuple[str, Dict[str, Any]]:
+def apply_single_transformation(source_text: str,transformation: Dict[str, Any]) -> Tuple[str, Dict[str, Any]]:
     # Apply one transformation only when exactly one safe match exists.
-    #
-    # The original source is returned unchanged when the transformation
-    # cannot be applied safely or is already present.
-    transformation_id = transformation.get(
-        "id",
-        "unknown"
-    )
+    # The original source is returned unchanged when the transformation cannot be applied safely or is already present.
+    transformation_id = transformation.get("id","unknown")
 
-    regions, error, parser_warnings = (
-        build_transformation_search_regions(
-            source_text,
-            transformation
-        )
-    )
+    regions, error, parser_warnings = (build_transformation_search_regions(source_text, transformation))
 
     result = {
         "transformation_id": transformation_id,
-        "file": transformation.get(
-            "file"
-        ),
-        "scope": transformation.get(
-            "scope"
-        ),
-        "function_name": (
-            get_transformation_function_name(
-                transformation
-            )
-        ),
+        "file": transformation.get("file"),
+        "scope": transformation.get("scope"),
+        "function_name": (get_transformation_function_name(transformation)),
         "expected_match": transformation.get(
             "match",
             ""
@@ -251,92 +146,54 @@ def apply_single_transformation(
 
     # Parser warnings mean that source boundaries may be unreliable.
     if parser_warnings:
-        result["reason"] = (
-            "The source produced parser warnings, so the "
-            "transformation was not applied."
-        )
-
+        result["reason"] = ("The source produced parser warnings, so the transformation was not applied.")
         return source_text, result
 
     if error is not None:
         result["reason"] = error
         return source_text, result
 
-    replacement = transformation.get(
-        "replacement"
-    )
+    replacement = transformation.get("replacement")
 
     if not isinstance(replacement, str):
-        result["reason"] = (
-            "The transformation does not contain a valid "
-            "replacement string."
-        )
-
+        result["reason"] = ("The transformation does not contain a valid replacement string.")
         return source_text, result
 
     # Check the full replacement before looking for the original code.
-    # This makes repeated application idempotent and prevents nested
-    # conditional blocks from being generated.
-    replacement_matches = find_matches_in_regions(
-        source_text,
-        regions,
-        replacement
-    )
+    # This makes repeated application idempotent and prevents nested conditional blocks from being generated.
+    replacement_matches = find_matches_in_regions(source_text, regions, replacement)
 
     if len(replacement_matches) == 1:
         result.update(
             {
                 "result": "ALREADY_APPLIED",
-                "reason": (
-                    "The complete replacement is already present "
-                    "in the required scope."
-                ),
+                "reason": ("The complete replacement is already present in the required scope."),
                 "match_count": 1,
                 "start": replacement_matches[0]["start"],
                 "end": replacement_matches[0]["end"],
             }
         )
-
         return source_text, result
 
     if len(replacement_matches) > 1:
-        result["reason"] = (
-            "The complete replacement was found more than once "
-            "in the required scope. The existing code is ambiguous."
-        )
-        result["match_count"] = len(
-            replacement_matches
-        )
-
+        result["reason"] = ("The complete replacement was found more than once in the required scope. The existing code is ambiguous.")
+        result["match_count"] = len(replacement_matches)
         return source_text, result
 
     matches = find_matches_in_regions(
         source_text,
         regions,
-        transformation.get(
-            "match",
-            ""
-        )
+        transformation.get("match", "")
     )
 
-    result["match_count"] = len(
-        matches
-    )
+    result["match_count"] = len(matches)
 
     if len(matches) == 0:
-        result["reason"] = (
-            "The expected code was not found in the "
-            "required scope."
-        )
-
+        result["reason"] = ("The expected code was not found in the required scope.")
         return source_text, result
 
     if len(matches) > 1:
-        result["reason"] = (
-            "The expected code was found more than once "
-            "in the required scope. The match is ambiguous."
-        )
-
+        result["reason"] = ("The expected code was found more than once in the required scope. The match is ambiguous.")
         return source_text, result
 
     match = matches[0]
@@ -344,19 +201,12 @@ def apply_single_transformation(
     match_start = match["start"]
     match_end = match["end"]
 
-    updated_source = (
-        source_text[:match_start]
-        + replacement
-        + source_text[match_end:]
-    )
+    updated_source = (source_text[:match_start] + replacement + source_text[match_end:])
 
     result.update(
         {
             "result": "APPLIED",
-            "reason": (
-                "The expected code was found exactly once "
-                "in the required scope."
-            ),
+            "reason": ("The expected code was found exactly once in the required scope."),
             "start": match_start,
             "end": match_end,
         }
@@ -364,56 +214,29 @@ def apply_single_transformation(
 
     return updated_source, result
 
-def load_transformations(
-    transformations_file: Path
-) -> List[Dict[str, Any]]:
+
+def load_transformations(transformations_file: Path) -> List[Dict[str, Any]]:
     # Read and perform basic validation on the transformation JSON.
     if not transformations_file.exists():
-        raise FileNotFoundError(
-            "Transformation file was not found: "
-            f"{transformations_file}"
-        )
+        raise FileNotFoundError("Transformation file was not found: " f"{transformations_file}")
 
     try:
-        transformation_data = json.loads(
-            transformations_file.read_text(
-                encoding="utf-8"
-            )
-        )
+        transformation_data = json.loads(transformations_file.read_text(encoding="utf-8"))
 
     except json.JSONDecodeError as error:
-        raise ValueError(
-            "Transformation file contains invalid JSON: "
-            f"{error}"
-        ) from error
+        raise ValueError("Transformation file contains invalid JSON: "f"{error}") from error
 
-    if not isinstance(
-        transformation_data,
-        dict
-    ):
-        raise ValueError(
-            "The root of the transformation JSON "
-            "must be an object."
-        )
+    if not isinstance(transformation_data, dict):
+        raise ValueError("The root of the transformation JSON must be an object.")
 
-    transformations = transformation_data.get(
-        "transformations"
-    )
+    transformations = transformation_data.get("transformations")
 
     if not isinstance(transformations, list):
-        raise ValueError(
-            "The transformation JSON must contain "
-            "a transformations list."
-        )
+        raise ValueError("The transformation JSON must contain a transformations list.")
 
-    for index, transformation in enumerate(
-        transformations,
-        start=1
-    ):
+    for index, transformation in enumerate(transformations, start=1):
         if not isinstance(transformation, dict):
-            raise ValueError(
-                f"Transformation {index} must be an object."
-            )
+            raise ValueError(f"Transformation {index} must be an object.")
 
         required_fields = {
             "id",
@@ -423,26 +246,57 @@ def load_transformations(
             "replacement",
         }
 
-        missing_fields = (
-            required_fields
-            - transformation.keys()
-        )
+        missing_fields = (required_fields- transformation.keys())
 
         if missing_fields:
-            missing_text = ", ".join(
-                sorted(missing_fields)
-            )
-
+            missing_text = ", ".join(sorted(missing_fields))
             raise ValueError(
                 f"Transformation {index} is missing "
                 f"required fields: {missing_text}"
             )
 
-    return transformations
+    # support_files is optional so older transformation JSON files
+    # containing only transformations remain valid.
+    support_files = transformation_data.get("support_files", [])
 
-def normalize_relative_file_path(
-    file_path: str
-) -> str:
+    if not isinstance(support_files, list):
+        raise ValueError("The support_files value must be a list.")
+
+    normalized_support_paths = set()
+
+    for index, support_file in enumerate(support_files, start=1):
+        if not isinstance(support_file, dict):
+            raise ValueError(f"Support file {index} must be an object.")
+
+        missing_fields = ({"path", "content"} - support_file.keys())
+
+        if missing_fields:
+            missing_text = ", ".join(sorted(missing_fields))
+            raise ValueError(
+                f"Support file {index} is missing "
+                f"required fields: {missing_text}"
+            )
+
+        path = support_file.get("path")
+        content = support_file.get("content")
+
+        if (not isinstance(path, str) or not path.strip()):
+            raise ValueError(f"Support file {index} must contain a non-empty string path.")
+
+        if not isinstance(content, str):
+            raise ValueError(f"Support file {index} must contain string content.")
+
+        normalized_path = (normalize_relative_file_path(path))
+
+        if normalized_path in normalized_support_paths:
+            raise ValueError(f"The support_files list contains the same path more than once: {normalized_path}")
+
+        normalized_support_paths.add(normalized_path)
+
+    return transformations, support_files
+
+
+def normalize_relative_file_path(file_path: str) -> str:
     # Use one consistent separator when comparing JSON file paths.
     return file_path.replace(
         "\\",
@@ -450,141 +304,63 @@ def normalize_relative_file_path(
     )
 
 
-def group_transformations_by_file(
-    transformations: List[Dict[str, Any]]
-) -> Dict[str, List[Dict[str, Any]]]:
+def group_transformations_by_file(transformations: List[Dict[str, Any]]) -> Dict[str, List[Dict[str, Any]]]:
     # Group transformations by their normalized relative file path.
     grouped_transformations = {}
 
     for transformation in transformations:
-        relative_file_path = (
-            normalize_relative_file_path(
-                str(
-                    transformation.get(
-                        "file",
-                        ""
-                    )
-                )
-            )
-        )
+        relative_file_path = (normalize_relative_file_path(str(transformation.get("file", ""))))
 
-        grouped_transformations.setdefault(
-            relative_file_path,
-            []
-        ).append(
-            transformation
-        )
+        grouped_transformations.setdefault(relative_file_path, []).append(transformation)
 
     return grouped_transformations
 
 
-def resolve_project_file(
-    project_directory: Path,
-    relative_file_path: str
-) -> Tuple[
-    Optional[Path],
-    Optional[str]
-]:
-    # Resolve a JSON file path without allowing it to leave
-    # the project directory.
-    normalized_path = (
-        normalize_relative_file_path(
-            relative_file_path
-        )
-    )
-
-    relative_path = Path(
-        normalized_path
-    )
+def resolve_project_file(project_directory: Path, relative_file_path: str) -> Tuple[Optional[Path], Optional[str]]:
+    # Resolve a JSON file path without allowing it to leave the project directory.
+    normalized_path = (normalize_relative_file_path(relative_file_path))
+    relative_path = Path(normalized_path)
 
     if relative_path.is_absolute():
-        return (
-            None,
-            "The transformation contains an absolute file path."
-        )
+        return (None, "The transformation contains an absolute file path.")
 
     if ".." in relative_path.parts:
-        return (
-            None,
-            "The transformation file path leaves the "
-            "project directory."
-        )
+        return (None, "The transformation file path leaves the project directory.")
 
-    project_directory_resolved = (
-        project_directory.resolve()
-    )
+    project_directory_resolved = (project_directory.resolve())
 
-    resolved_file = (
-        project_directory
-        / relative_path
-    ).resolve()
+    resolved_file = (project_directory / relative_path).resolve()
 
     try:
-        resolved_file.relative_to(
-            project_directory_resolved
-        )
+        resolved_file.relative_to(project_directory_resolved)
 
     except ValueError:
-        return (
-            None,
-            "The transformation file path leaves the "
-            "project directory."
-        )
+        return (None, "The transformation file path leaves the project directory.")
 
     return resolved_file, None
 
-def apply_transformations_to_source(
-    source_text: str,
-    transformations: List[Dict[str, Any]]
-) -> Tuple[
-    str,
-    List[Dict[str, Any]]
-]:
+
+def apply_transformations_to_source(source_text: str, transformations: List[Dict[str, Any]]) -> Tuple[str,List[Dict[str, Any]]]:
     # Apply transformations in their JSON order.
-    #
-    # Each transformation searches the latest version of the source,
-    # including changes made by previously applied transformations.
+    # Each transformation searches the latest version of the source, including changes made by previously applied transformations.
     updated_source = source_text
     application_results = []
 
     for transformation in transformations:
-        updated_source, result = (
-            apply_single_transformation(
-                updated_source,
-                transformation
-            )
-        )
+        updated_source, result = (apply_single_transformation(updated_source, transformation))
 
-        application_results.append(
-            result
-        )
+        application_results.append(result)
 
-    return (
-        updated_source,
-        application_results
-    )
+    return (updated_source, application_results)
 
-def build_file_skip_result(
-    transformation: Dict[str, Any],
-    reason: str
-) -> Dict[str, Any]:
+
+def build_file_skip_result(transformation: Dict[str, Any],reason: str) -> Dict[str, Any]:
     # Create a standard result when a source file cannot be processed.
     return {
-        "transformation_id": transformation.get(
-            "id",
-            "unknown"
-        ),
-        "file": transformation.get(
-            "file"
-        ),
-        "scope": transformation.get(
-            "scope"
-        ),
-        "function_name": (
-            get_transformation_function_name(
-                transformation
-            )
-        ),
+        "transformation_id": transformation.get("id", "unknown"),
+        "file": transformation.get("file"),
+        "scope": transformation.get("scope"),
+        "function_name": (get_transformation_function_name(transformation)),
         "expected_match": transformation.get(
             "match",
             ""
@@ -597,155 +373,67 @@ def build_file_skip_result(
         "end": None,
     }
 
-def apply_transformations_to_project(
-    output_directory: Path,
-    transformations: List[Dict[str, Any]]
-) -> List[Dict[str, Any]]:
-    # Apply transformations to their corresponding files
-    # inside the generated project.
-    grouped_transformations = (
-        group_transformations_by_file(
-            transformations
-        )
-    )
+
+def apply_transformations_to_project(output_directory: Path,transformations: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    # Apply transformations to their corresponding files inside the generated project.
+    grouped_transformations = (group_transformations_by_file(transformations))
 
     application_results = []
 
-    for (
-        relative_file_path,
-        file_transformations
-    ) in grouped_transformations.items():
-        output_file, path_error = (
-            resolve_project_file(
-                output_directory,
-                relative_file_path
-            )
-        )
+    for (relative_file_path, file_transformations) in grouped_transformations.items():
+        output_file, path_error = (resolve_project_file(output_directory, relative_file_path))
 
         if output_file is None:
             for transformation in file_transformations:
-                application_results.append(
-                    build_file_skip_result(
-                        transformation,
-                        path_error
-                        or "The file path is invalid."
-                    )
-                )
-
+                application_results.append(build_file_skip_result(transformation, path_error or "The file path is invalid."))
             continue
 
         if not output_file.exists():
-            reason = (
-                "The file was not found in new_original: "
-                f"{relative_file_path}"
-            )
+            reason = (f"The file was not found in new_original: {relative_file_path}")
 
             for transformation in file_transformations:
-                application_results.append(
-                    build_file_skip_result(
-                        transformation,
-                        reason
-                    )
-                )
-
+                application_results.append(build_file_skip_result(transformation, reason))
             continue
 
         if not output_file.is_file():
-            reason = (
-                "The transformation path does not point "
-                "to a regular file."
-            )
+            reason = ("The transformation path does not point to a regular file.")
 
             for transformation in file_transformations:
-                application_results.append(
-                    build_file_skip_result(
-                        transformation,
-                        reason
-                    )
-                )
-
+                application_results.append(build_file_skip_result(transformation, reason))
             continue
 
         try:
-            source_text = output_file.read_text(
-                encoding="utf-8"
-            )
+            source_text = output_file.read_text(encoding="utf-8")
 
         except UnicodeDecodeError:
-            reason = (
-                "The file could not be read as UTF-8 text."
-            )
+            reason = ("The file could not be read as UTF-8 text.")
 
             for transformation in file_transformations:
-                application_results.append(
-                    build_file_skip_result(
-                        transformation,
-                        reason
-                    )
-                )
-
+                application_results.append(build_file_skip_result(transformation, reason))
             continue
 
-        updated_source, file_results = (
-            apply_transformations_to_source(
-                source_text,
-                file_transformations
-            )
-        )
 
-        output_file.write_text(
-            updated_source,
-            encoding="utf-8"
-        )
-
-        application_results.extend(
-            file_results
-        )
+        updated_source, file_results = (apply_transformations_to_source(source_text, file_transformations))
+        output_file.write_text(updated_source,encoding="utf-8")
+        application_results.extend(file_results)
 
     return application_results
 
-def indent_text(
-    text: str,
-    indentation: str = "    "
-) -> str:
+
+def indent_text(text: str, indentation: str = "    ") -> str:
     # Indent multiline source text for a readable report.
     lines = text.splitlines()
-
     if not lines:
         return indentation + "<empty>"
-
-    return "\n".join(
-        indentation + line
-        for line in lines
-    )
+    
+    return "\n".join(indentation + line for line in lines)
 
 
-def save_application_report(
-    application_results: List[Dict[str, Any]],
-    transformation_count: int,
-    transformed_file_count: int,
-    output_file: Path
-) -> None:
+def save_application_report(application_results: List[Dict[str, Any]], transformation_count: int, transformed_file_count: int, output_file: Path) -> None:
     # Write a detailed report for applied and skipped transformations.
-    applied_count = sum(
-        result["result"] == "APPLIED"
-        for result in application_results
-    )
-
-    skipped_count = sum(
-        result["result"] == "SKIPPED"
-        for result in application_results
-    )
-
-    warning_count = sum(
-        len(
-            result.get(
-                "parser_warnings",
-                []
-            )
-        )
-        for result in application_results
-    )
+    applied_count = sum(result["result"] == "APPLIED" for result in application_results)
+    skipped_count = sum(result["result"] == "SKIPPED" for result in application_results)
+    warning_count = sum(len(result.get("parser_warnings", [])) for result in application_results)
 
     report_lines = [
         "REHOST TRANSFORMATION APPLICATION REPORT",
@@ -753,26 +441,11 @@ def save_application_report(
         "",
         "SUMMARY",
         "-------",
-        (
-            "Files containing transformations: "
-            f"{transformed_file_count}"
-        ),
-        (
-            "Transformations loaded: "
-            f"{transformation_count}"
-        ),
-        (
-            "Transformations applied: "
-            f"{applied_count}"
-        ),
-        (
-            "Transformations skipped: "
-            f"{skipped_count}"
-        ),
-        (
-            "Parser warnings: "
-            f"{warning_count}"
-        ),
+        (f"Files containing transformations: {transformed_file_count}"),
+        (f"Transformations loaded: {transformation_count}"),
+        (f"Transformations applied: {applied_count}"),
+        (f"Transformations skipped: {skipped_count}"),
+        (f"Parser warnings: {warning_count}"),
         ""
     ]
 
@@ -788,30 +461,20 @@ def save_application_report(
         report_lines.extend(
             [
                 f"[{result['result']}]",
-                (
-                    "Transformation: "
-                    f"{result['transformation_id']}"
-                ),
+                (f"Transformation: {result['transformation_id']}"),
                 f"File: {result['file']}",
                 f"Scope: {result['scope']}"
             ]
         )
 
-        function_name = result.get(
-            "function_name"
-        )
+        function_name = result.get("function_name")
 
         if function_name is not None:
-            report_lines.append(
-                f"Function: {function_name}"
-            )
+            report_lines.append(f"Function: {function_name}")
 
         report_lines.extend(
             [
-                (
-                    "Normalized match count: "
-                    f"{result['match_count']}"
-                ),
+                (f"Normalized match count: {result['match_count']}"),
                 f"Reason: {result['reason']}"
             ]
         )
@@ -819,102 +482,52 @@ def save_application_report(
         if result["result"] == "APPLIED":
             report_lines.extend(
                 [
-                    (
-                        "Original character range: "
-                        f"{result['start']}:{result['end']}"
-                    ),
+                    (f"Original character range: {result['start']}:{result['end']}"),
                     ""
                 ]
             )
 
         else:
-            expected_match = str(
-                result.get(
-                    "expected_match",
-                    ""
-                )
-            )
+            expected_match = str(result.get("expected_match", ""))
 
             report_lines.extend(
                 [
                     "Expected code:",
-                    indent_text(
-                        expected_match
-                    ),
+                    indent_text(expected_match), 
                     ""
                 ]
             )
 
-        parser_warnings = result.get(
-            "parser_warnings",
-            []
-        )
-
+        parser_warnings = result.get("parser_warnings", [])
         if parser_warnings:
-            report_lines.append(
-                "Parser warnings:"
-            )
+            report_lines.append("Parser warnings:")
 
             for warning in parser_warnings:
-                report_lines.append(
-                    f"    - {warning}"
-                )
-
+                report_lines.append(f"    - {warning}")
             report_lines.append("")
 
-    output_file.write_text(
-        "\n".join(report_lines),
-        encoding="utf-8"
-    )
+
+    output_file.write_text("\n".join(report_lines), encoding="utf-8")
 
 
 def main() -> None:
-    transformations = load_transformations(
-        TRANSFORMATIONS_FILE
-    )
+    transformations = load_transformations(TRANSFORMATIONS_FILE)
 
-    prepare_generated_project(
-        source_directory=NEW_ORIGINAL_DIR,
-        output_directory=GENERATED_REHOST_DIR
-    )
+    prepare_generated_project(source_directory=NEW_ORIGINAL_DIR, output_directory=GENERATED_REHOST_DIR)
 
-    application_results = (
-        apply_transformations_to_project(
-            output_directory=(
-                GENERATED_REHOST_DIR
-            ),
-            transformations=transformations
-        )
-    )
+    application_results = (apply_transformations_to_project(output_directory=(GENERATED_REHOST_DIR), transformations=transformations))
 
-
-    grouped_transformations = (
-        group_transformations_by_file(
-            transformations
-        )
-    )
-
+    grouped_transformations = (group_transformations_by_file(transformations))
 
     save_application_report(
         application_results=application_results,
-        transformation_count=len(
-            transformations
-        ),
-        transformed_file_count=len(
-            grouped_transformations
-        ),
+        transformation_count=len(transformations),
+        transformed_file_count=len(grouped_transformations),
         output_file=APPLICATION_REPORT_FILE
     )
 
-    print(
-        "\nGenerated project written to: "
-        f"{GENERATED_REHOST_DIR}"
-    )
-
-    print(
-        "Application report written to: "
-        f"{APPLICATION_REPORT_FILE}"
-    )
+    print(f"\nGenerated project written to: {GENERATED_REHOST_DIR}")
+    print(f"Application report written to: {APPLICATION_REPORT_FILE}")
 
 
 if __name__ == "__main__":

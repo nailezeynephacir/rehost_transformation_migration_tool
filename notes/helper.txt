@@ -1,0 +1,25 @@
+Böylece transformation_matching.py içindeki bütün fonksiyonları tamamlamış olduk. Bu dosyanın tamamındaki ilişkiyi tek bir akış diyagramı gibi düşündüğümüzde:
+
+normalize_code_text
+    → karşılaştırılabilir kod üretir
+
+normalize_code_with_positions
+    → normalize kod + gerçek pozisyon haritası üretir
+
+find_normalized_matches
+    → tek metin içindeki eşleşmeleri bulur
+
+move_matches_to_source_positions
+    → lokal pozisyonları dosya geneline taşır
+
+find_matches_in_regions
+    → bağımsız bölgelerde gerçek eşleşmeleri bulur
+
+find_matching_function
+    → doğru isim ve imzaya sahip fonksiyonu seçer
+
+build_non_function_regions
+    → fonksiyon dışı bağımsız arama alanları oluşturur
+
+count_normalized_occurrences
+    → bölgelerdeki toplam eşleşme sayısını hesaplar
