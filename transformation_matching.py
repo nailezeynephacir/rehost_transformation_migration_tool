@@ -1,6 +1,6 @@
 from typing import Any, Dict, List, Optional, Tuple
 
-from parser import mask_comments
+from parser import mask_comments,normalize_function_signature
 
 
 def normalize_code_text(text: str) -> str:
@@ -199,12 +199,20 @@ def find_matching_function(
         )
 
     # Then require the normalized signature to remain unchanged.
+    expected_signature = (
+    normalize_function_signature(
+        function_signature
+    )
+    )
+
     matching_functions = [
         function
         for function in same_name_functions
         if (
-            function["normalized_signature"]
-            == function_signature
+            normalize_function_signature(
+                function["signature"]
+            )
+            == expected_signature
         )
     ]
 
@@ -218,10 +226,21 @@ def find_matching_function(
             "name and signature was found."
         )
 
+    found_signatures = [
+        normalize_function_signature(
+            function["signature"]
+        )
+        for function in same_name_functions
+    ]
+
     return (
         None,
-        "The function name was found, but its signature "
-        "has changed."
+        (
+            "The function name was found, but its signature "
+            "has changed. "
+            f"Expected signature: {expected_signature}. "
+            f"Found signature(s): {', '.join(found_signatures)}."
+        )
     )
 
 
