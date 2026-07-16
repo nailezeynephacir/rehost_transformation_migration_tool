@@ -215,7 +215,7 @@ def apply_single_transformation(source_text: str,transformation: Dict[str, Any])
     return updated_source, result
 
 
-def load_transformations(transformations_file: Path) -> List[Dict[str, Any]]:
+def load_transformations(transformations_file: Path) -> Tuple[List[Dict[str, Any]], List[Dict[str, str]]]:
     # Read and perform basic validation on the transformation JSON.
     if not transformations_file.exists():
         raise FileNotFoundError("Transformation file was not found: " f"{transformations_file}")
@@ -511,7 +511,7 @@ def save_application_report(application_results: List[Dict[str, Any]], transform
 
 
 def main() -> None:
-    transformations = load_transformations(TRANSFORMATIONS_FILE)
+    transformations, support_files = load_transformations(TRANSFORMATIONS_FILE)
 
     prepare_generated_project(source_directory=NEW_ORIGINAL_DIR, output_directory=GENERATED_REHOST_DIR)
 
