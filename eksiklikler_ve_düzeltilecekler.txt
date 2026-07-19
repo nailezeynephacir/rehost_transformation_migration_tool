@@ -24,3 +24,6 @@ Matched original branch:
     #include <msp430.h>
     	#include "driverlib.h"
         #include "windows.h"
+
+
+utf-8 sıkıntısı

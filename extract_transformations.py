@@ -77,7 +77,7 @@ def get_original_search_regions(block: Dict[str, Any], original_source: str, ori
     # Rehost içinden çıkarılan conditional block için şunu belirler: Bu block’un original hâlini eski original dosyanın hangi kısmında aramalıyım?
     # function scope → yalnızca aynı fonksiyonun gövdesinde ara
     # include scope → yalnızca fonksiyonların dışında ara
-    # global scope→ yalnızca fonksiyonların dışında ara
+    # global scope → yalnızca fonksiyonların dışında ara
 
     # Function transformations must be verified only inside the matching function.
     if block["scope"] == "function":
@@ -157,6 +157,7 @@ def select_matching_original_branch(block: Dict[str, Any], search_regions: List[
 
     found_matches = [result for result in branch_results if result["occurrence_count"] > 0]
 
+    # MODIFY: safe case çok safe ya
     # Safe case:
     # One branch occurs exactly once and the other does not occur.
     if (len(unique_matches) == 1 and len(found_matches) == 1):
