@@ -1,0 +1,26 @@
+[SKIPPED]
+File: 01_applied_once.c
+Scope: function
+Function: add_values
+Rehost opening line: 3
+Reason: Neither conditional branch was found as one continuous block in the expected scope. Results: first branch: 0 match(es), else branch: 0 match(es).
+Matched original branch:
+    int gaipten_gelen_bazı_şeyler = 11;
+        int bi_tane_daha = 44;
+
+gaipten gelen şeyleri kabul etmiyor, original kodda olmasını bekliyor.
+
+
+nested kabul etmiyor
+
+
+aynı hata:
+[SKIPPED]
+File: 01_applied_once.c
+Scope: include
+Rehost opening line: 14
+Reason: Neither conditional branch was found as one continuous block in the expected scope. Results: first branch: 0 match(es), else branch: 0 match(es).
+Matched original branch:
+    #include <msp430.h>
+    	#include "driverlib.h"
+        #include "windows.h"
