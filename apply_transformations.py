@@ -127,6 +127,7 @@ def apply_insertion_transformation(source_text: str, transformation: Dict[str, A
         "result": "SKIPPED",
         "reason": "",
         "match_count": 0,
+        "fallback_match_count": 0,
         "parser_warnings": parser_warnings,
         "start": None,
         "end": None,
@@ -219,17 +220,47 @@ def apply_insertion_transformation(source_text: str, transformation: Dict[str, A
 
     result["match_count"] = len(anchor_matches)
 
-    if len(anchor_matches) == 0:
-        result["reason"] = ("The insertion anchor was not found in the required scope.")
-        return source_text, result
+    used_position = position
+    used_anchor = anchor
+    used_fallback = False
 
-    if len(anchor_matches) > 1:
-        result["reason"] = ("The insertion anchor was found more than once in the required scope. The insertion point is ambiguous.")
+    if len(anchor_matches) == 0:
+        fallback_position = transformation.get("fallback_position")
+        fallback_anchor = transformation.get("fallback_anchor")
+
+        fallback_is_valid = (
+            fallback_position in {"before", "after"}
+            and isinstance(fallback_anchor, str)
+            and fallback_anchor.strip()
+        )
+
+        if not fallback_is_valid:
+            result["reason"] = ("The primary insertion anchor was not found in the required scope and no valid fallback anchor is available.")
+            return source_text, result
+
+        fallback_matches = find_matches_in_regions(source_text, regions, fallback_anchor)
+        result["fallback_match_count"] = len(fallback_matches)
+
+        if len(fallback_matches) == 0:
+            result["reason"] = ("Neither the primary insertion anchor nor the fallback anchor was found in the required scope.")
+            return source_text, result
+
+        if len(fallback_matches) > 1:
+            result["reason"] = ("The primary insertion anchor was not found and the fallback anchor was found more than once. The insertion point is ambiguous.")
+            return source_text, result
+
+        anchor_matches = fallback_matches
+        used_position = fallback_position
+        used_anchor = fallback_anchor
+        used_fallback = True
+
+    elif len(anchor_matches) > 1:
+        result["reason"] = ("The primary insertion anchor was found more than once in the required scope. The insertion point is ambiguous.")
         return source_text, result
 
     anchor_match = anchor_matches[0]
 
-    if position == "before":
+    if used_position == "before":
         insertion_index = anchor_match["start"]
     else:
         insertion_index = anchor_match["end"]
@@ -243,7 +274,14 @@ def apply_insertion_transformation(source_text: str, transformation: Dict[str, A
     result.update(
         {
             "result": "APPLIED",
-            "reason": (f"The insertion anchor was found exactly once and the content was inserted {position} it."),
+            "reason": (
+                f"The primary anchor was not found, so the fallback anchor was used and the content was inserted {used_position} it."
+                if used_fallback
+                else
+                f"The primary insertion anchor was found exactly once and the content was inserted {used_position} it."),
+            "used_anchor": used_anchor,
+            "used_position": used_position,
+            "used_fallback": used_fallback,
             "start": insertion_index,
             "end": insertion_index + len(content.strip()),
         }
