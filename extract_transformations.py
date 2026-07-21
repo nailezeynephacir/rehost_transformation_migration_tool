@@ -427,7 +427,8 @@ def build_insertion_transformation(transformation_number: int, relative_file_pat
         },
     }
 
-def build_anchor_insertion_transformation(transformation_number: int, relative_file_path: str, block: Dict[str, Any], position: str, anchor: str) -> Dict[str, Any]:
+def build_anchor_insertion_transformation(transformation_number: int, relative_file_path: str, block: Dict[str, Any], position: str, anchor: str, fallback_position: Optional[str] = None, fallback_anchor: Optional[str] = None
+) -> Dict[str, Any]:
     # Store a rehost-only conditional block as an insertion immediately before or after a unique anchor.
     transformation = {
         "id": f"conditional_{transformation_number}",
@@ -439,7 +440,15 @@ def build_anchor_insertion_transformation(transformation_number: int, relative_f
         "content": block["full_text"].strip(),
     }
 
-    # Function information is needed only for function-scope insertions.
+    # Store the opposite-side anchor as a fallback when available.
+    if (
+        fallback_position in {"before", "after"}
+        and isinstance(fallback_anchor, str)
+        and fallback_anchor.strip()
+    ):
+        transformation["fallback_position"] = fallback_position
+        transformation["fallback_anchor"] = fallback_anchor
+
     if block["scope"] == "function":
         transformation["function"] = {
             "name": block["function_name"],
@@ -547,39 +556,47 @@ def extract_transformations(original_source: str, rehost_source: str, original_p
             if branches_are_absent:
                 insertion_position = None
                 insertion_anchor = None
+                fallback_position = None
+                fallback_anchor = None
 
                 if block["scope"] == "function":
                     # First try a reliable function boundary.
                     insertion_position = (determine_function_insertion_position(block=block, rehost_source=rehost_source, rehost_functions=rehost_functions))
 
-                    # If the block is in the middle of the function, try the following code as an anchor.
+                    # Anchors are needed only when the block is not at a reliable function boundary.
                     if insertion_position is None:
-                        insertion_anchor = (find_unique_following_anchor(block=block, rehost_source=rehost_source, rehost_functions=rehost_functions, original_search_regions=search_regions))
+                        following_anchor = (find_unique_following_anchor(block=block, rehost_source=rehost_source, rehost_functions=rehost_functions, original_search_regions=search_regions))
+                        preceding_anchor = (find_unique_preceding_anchor(block=block, rehost_source=rehost_source, rehost_functions=rehost_functions, original_search_regions=search_regions))
 
-                        if insertion_anchor is not None:
+                        if following_anchor is not None:
                             insertion_position = "before"
+                            insertion_anchor = following_anchor
 
-                    # If the following anchor is unavailable, try the preceding code.
-                    if insertion_position is None:
-                        insertion_anchor = (find_unique_preceding_anchor(block=block, rehost_source=rehost_source, rehost_functions=rehost_functions, original_search_regions=search_regions))
+                            if preceding_anchor is not None:
+                                fallback_position = "after"
+                                fallback_anchor = preceding_anchor
 
-                        if insertion_anchor is not None:
+                        elif preceding_anchor is not None:
                             insertion_position = "after"
+                            insertion_anchor = preceding_anchor
 
                 elif block["scope"] in {"include", "global"}:
-                    # Function-external blocks first try the following non-function code as an anchor.
-                    insertion_anchor = (find_unique_following_non_function_anchor(block=block, rehost_source=rehost_source, rehost_functions=rehost_functions, original_search_regions=search_regions))
+                    following_anchor = find_unique_following_non_function_anchor(block=block,rehost_source=rehost_source,rehost_functions=rehost_functions,original_search_regions=search_regions)
+                    preceding_anchor = find_unique_preceding_non_function_anchor(block=block, rehost_source=rehost_source, rehost_functions=rehost_functions, original_search_regions=search_regions)
 
-                    if insertion_anchor is not None:
+                    # Prefer the following code as the primary anchor.
+                    if following_anchor is not None:
                         insertion_position = "before"
+                        insertion_anchor = following_anchor
 
-                    # If unavailable, try the preceding non-function code.
-                    else:
-                        insertion_anchor = (
-                            find_unique_preceding_non_function_anchor(block=block, rehost_source=rehost_source, rehost_functions=rehost_functions, original_search_regions=search_regions))
+                        if preceding_anchor is not None:
+                            fallback_position = "after"
+                            fallback_anchor = preceding_anchor
 
-                        if insertion_anchor is not None:
-                            insertion_position = "after"
+                    elif preceding_anchor is not None:
+                        insertion_position = "after"
+                        insertion_anchor = preceding_anchor
+
 
                 transformation = None
 
@@ -602,7 +619,9 @@ def extract_transformations(original_source: str, rehost_source: str, original_p
                             relative_file_path=relative_file_path,
                             block=block,
                             position=insertion_position,
-                            anchor=insertion_anchor
+                            anchor=insertion_anchor,
+                            fallback_position=fallback_position,
+                            fallback_anchor=fallback_anchor
                         )
                     )
 
@@ -638,8 +657,8 @@ def extract_transformations(original_source: str, rehost_source: str, original_p
 
         transformation = build_transformation(
             transformation_number=(starting_transformation_number + len(transformations)),
-            relative_file_path=(relative_file_path),
-            block=selected_block
+            relative_file_path=relative_file_path,
+            block=selected_block,
         )
 
         transformations.append(transformation)
