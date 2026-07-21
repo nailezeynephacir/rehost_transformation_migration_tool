@@ -49,30 +49,18 @@ def build_transformation_search_regions(source_text: str, transformation: Dict[s
         function_information = transformation.get("function") 
 
         if not isinstance(function_information, dict):
-            return (
-                [],
-                "Function information is missing from the transformation.",
-                parser_warnings
-            )
+            return ([], "Function information is missing from the transformation.", parser_warnings)
 
         function_name = function_information.get("name")
         function_signature = function_information.get("signature")
 
         if (not function_name or not function_signature):
-            return (
-                [],
-                "Function name or signature is missing from the transformation.",
-                parser_warnings
-            )
+            return ([], "Function name or signature is missing from the transformation.", parser_warnings)
 
         matching_function, error = find_matching_function(functions, function_name, function_signature)
 
         if matching_function is None:
-            return (
-                [],
-                error,
-                parser_warnings
-            )
+            return ([], error, parser_warnings)
 
         # Search only inside the function body.
         body_start = (matching_function["body_start"] + 1)
@@ -102,6 +90,165 @@ def build_transformation_search_regions(source_text: str, transformation: Dict[s
         f"Unsupported transformation scope: {scope}",
         parser_warnings
     )
+
+
+def insert_text_at_position(source_text: str, insertion_index: int, content: str) -> str:
+    # Insert a block while keeping it separated from surrounding code.
+    prefix = source_text[:insertion_index]
+    suffix = source_text[insertion_index:]
+
+    text_to_insert = content.strip()
+
+    if prefix and not prefix.endswith("\n"):
+        text_to_insert = "\n" + text_to_insert
+
+    if suffix and not suffix.startswith("\n"):
+        text_to_insert = text_to_insert + "\n"
+
+    return (prefix + text_to_insert + suffix)
+
+
+def apply_insertion_transformation(source_text: str, transformation: Dict[str, Any]) -> Tuple[str, Dict[str, Any]]:
+    # Apply a positional insertion only when its scope and insertion point can be identified safely.
+    transformation_id = transformation.get("id", "unknown")
+
+    regions, error, parser_warnings = (build_transformation_search_regions(source_text, transformation))
+
+    content = transformation.get("content")
+    position = transformation.get("position")
+    anchor = transformation.get("anchor")
+
+    result = {
+        "transformation_id": transformation_id,
+        "file": transformation.get("file"),
+        "scope": transformation.get("scope"),
+        "function_name": (get_transformation_function_name(transformation)),
+        "expected_match": (anchor if isinstance(anchor, str) else ""),
+        "result": "SKIPPED",
+        "reason": "",
+        "match_count": 0,
+        "parser_warnings": parser_warnings,
+        "start": None,
+        "end": None,
+    }
+
+    # Parser warnings mean that function and non-function boundaries may be unreliable.
+    if parser_warnings:
+        result["reason"] = ("The source produced parser warnings, so the insertion was not applied.")
+        return source_text, result
+
+    if error is not None:
+        result["reason"] = error
+        return source_text, result
+
+    if not isinstance(content, str) or not content.strip():
+        result["reason"] = ("The insertion does not contain valid content.")
+        return source_text, result
+
+    # Check whether the complete conditional block is already present in the required scope. This keeps repeated application idempotent.
+    content_matches = find_matches_in_regions(source_text, regions, content)
+
+    if len(content_matches) == 1:
+        existing_match = content_matches[0]
+
+        result.update(
+            {
+                "result": "ALREADY_APPLIED",
+                "reason": ("The complete insertion content is already present in the required scope."),
+                "match_count": 1,
+                "start": existing_match["start"],
+                "end": existing_match["end"],
+            }
+        )
+
+        return source_text, result
+
+    if len(content_matches) > 1:
+        result.update(
+            {
+                "reason": "The complete insertion content was found more than once in the required scope. The existing code is ambiguous.",
+                "match_count": len(content_matches),
+            }
+        )
+
+        return source_text, result
+
+    # Function-boundary insertions do not use an anchor.
+    if position in {"function_start", "function_end"}:
+        if transformation.get("scope") != "function":
+            result["reason"] = (f"The {position} position can only be used with function-scope transformations.")
+            return source_text, result
+
+        if len(regions) != 1:
+            result["reason"] = ("A unique function body region could not be identified.")
+            return source_text, result
+
+        function_region = regions[0]
+
+        if position == "function_start":
+            insertion_index = function_region["start"]
+        else:
+            insertion_index = function_region["end"]
+
+        updated_source = insert_text_at_position(
+            source_text=source_text,
+            insertion_index=insertion_index,
+            content=content
+        )
+
+        result.update(
+            {
+                "result": "APPLIED",
+                "reason": (f"The insertion was applied at the {position} position."),
+                "start": insertion_index,
+                "end": insertion_index + len(content.strip()),
+            }
+        )
+        return updated_source, result
+
+    # Anchor-based insertions require exactly one anchor match.
+    if position not in {"before", "after"}:
+        result["reason"] = (f"Unsupported insertion position: {position}")
+        return source_text, result
+
+    if not isinstance(anchor, str) or not anchor.strip():
+        result["reason"] = ("The anchor-based insertion does not contain a valid anchor.")
+        return source_text, result
+
+    anchor_matches = find_matches_in_regions(source_text, regions, anchor)
+
+    result["match_count"] = len(anchor_matches)
+
+    if len(anchor_matches) == 0:
+        result["reason"] = ("The insertion anchor was not found in the required scope.")
+        return source_text, result
+
+    if len(anchor_matches) > 1:
+        result["reason"] = ("The insertion anchor was found more than once in the required scope. The insertion point is ambiguous.")
+        return source_text, result
+
+    anchor_match = anchor_matches[0]
+
+    if position == "before":
+        insertion_index = anchor_match["start"]
+    else:
+        insertion_index = anchor_match["end"]
+
+    updated_source = insert_text_at_position(
+        source_text=source_text,
+        insertion_index=insertion_index,
+        content=content
+    )
+
+    result.update(
+        {
+            "result": "APPLIED",
+            "reason": (f"The insertion anchor was found exactly once and the content was inserted {position} it."),
+            "start": insertion_index,
+            "end": insertion_index + len(content.strip()),
+        }
+    )
+    return updated_source, result
 
 
 def get_transformation_function_name(transformation: Dict[str, Any]) -> Optional[str]:
@@ -151,6 +298,28 @@ def apply_replacement_to_matches(source_text: str, matches: List[Dict[str, Any]]
 def apply_single_transformation(source_text: str,transformation: Dict[str, Any]) -> Tuple[str, Dict[str, Any]]:
     # Apply one transformation only when exactly one safe match exists.
     # The original source is returned unchanged when the transformation cannot be applied safely or is already present.
+    operation = transformation.get("operation", "replace")
+
+    if operation == "insert":
+        return apply_insertion_transformation(source_text=source_text, transformation=transformation)
+
+    if operation != "replace":
+        transformation_id = transformation.get("id", "unknown")
+
+        return source_text, {
+            "transformation_id": transformation_id,
+            "file": transformation.get("file"),
+            "scope": transformation.get("scope"),
+            "function_name": (get_transformation_function_name(transformation)),
+            "expected_match": "",
+            "result": "SKIPPED",
+            "reason": (f"Unsupported transformation operation: {operation}"),
+            "match_count": 0,
+            "parser_warnings": [],
+            "start": None,
+            "end": None,
+        }
+
     transformation_id = transformation.get("id","unknown")
 
     regions, error, parser_warnings = (build_transformation_search_regions(source_text, transformation))
@@ -160,10 +329,7 @@ def apply_single_transformation(source_text: str,transformation: Dict[str, Any])
         "file": transformation.get("file"),
         "scope": transformation.get("scope"),
         "function_name": (get_transformation_function_name(transformation)),
-        "expected_match": transformation.get(
-            "match",
-            ""
-        ),
+        "expected_match": transformation.get("match", ""),
         "match_count": 0,
         "replacement_match_count": 0,
         "applied_count": 0,
@@ -188,61 +354,6 @@ def apply_single_transformation(source_text: str,transformation: Dict[str, Any])
         result["reason"] = ("The transformation does not contain a valid replacement string.")
         return source_text, result
 
-    # Check the full replacement before looking for the original code.
-    # This makes repeated application idempotent and prevents nested conditional blocks from being generated.
-    # replacement_matches = find_matches_in_regions(source_text, regions, replacement)
-
-    # if len(replacement_matches) == 1:
-    #     result.update(
-    #         {
-    #             "result": "ALREADY_APPLIED",
-    #             "reason": ("The complete replacement is already present in the required scope."),
-    #             "match_count": 1,
-    #             "start": replacement_matches[0]["start"],
-    #             "end": replacement_matches[0]["end"],
-    #         }
-    #     )
-    #     return source_text, result
-
-    # if len(replacement_matches) > 1:
-    #     result["reason"] = ("The complete replacement was found more than once in the required scope. The existing code is ambiguous.")
-    #     result["match_count"] = len(replacement_matches)
-    #     return source_text, result
-
-    # matches = find_matches_in_regions(
-    #     source_text,
-    #     regions,
-    #     transformation.get("match", "")
-    # )
-
-    # result["match_count"] = len(matches)
-
-    # if len(matches) == 0:
-    #     result["reason"] = ("The expected code was not found in the required scope.")
-    #     return source_text, result
-
-    # if len(matches) > 1:
-    #     result["reason"] = ("The expected code was found more than once in the required scope. The match is ambiguous.")
-    #     return source_text, result
-
-    # match = matches[0]
-
-    # match_start = match["start"]
-    # match_end = match["end"]
-
-    # updated_source = (source_text[:match_start] + replacement + source_text[match_end:])
-
-    # result.update(
-    #     {
-    #         "result": "APPLIED",
-    #         "reason": ("The expected code was found exactly once in the required scope."),
-    #         "start": match_start,
-    #         "end": match_end,
-    #     }
-    # )
-
-    # return updated_source, result
-    # First locate complete replacements that already exist.
     replacement_matches = find_matches_in_regions(source_text, regions, replacement)
 
     result["replacement_match_count"] = len(replacement_matches)
@@ -345,23 +456,31 @@ def load_transformations(transformations_file: Path) -> Tuple[List[Dict[str, Any
         if not isinstance(transformation, dict):
             raise ValueError(f"Transformation {index} must be an object.")
 
-        required_fields = {
-            "id",
-            "file",
-            "scope",
-            "match",
-            "replacement",
-        }
+        operation = transformation.get("operation", "replace")
 
-        missing_fields = (required_fields- transformation.keys())
+        # These fields are required for every transformation type.
+        required_fields = {"id", "file", "scope",}
+
+        if operation == "replace":
+            required_fields.update({"match", "replacement",})
+
+        elif operation == "insert":
+            required_fields.update({"position", "content",})
+
+        else:
+            raise ValueError(f"Transformation {index} contains an unsupported operation: {operation}")
+
+        missing_fields = (required_fields - transformation.keys())
 
         if missing_fields:
             missing_text = ", ".join(sorted(missing_fields))
-            raise ValueError(
-                f"Transformation {index} is missing "
-                f"required fields: {missing_text}"
-            )
 
+            raise ValueError(f"Transformation {index} is missing required fields: {missing_text}")
+
+        # Anchor-based insertions also require an anchor.
+        if (operation == "insert" and transformation.get("position") in {"before", "after",} and "anchor" not in transformation):
+            raise ValueError(f"Transformation {index} is an anchor-based insertion but does not contain an anchor.")
+        
     # support_files is optional so older transformation JSON files
     # containing only transformations remain valid.
     support_files = transformation_data.get("support_files", [])
@@ -574,18 +693,17 @@ def apply_transformations_to_project(output_directory: Path,transformations: Lis
             continue
 
         try:
-            source_text = output_file.read_text(encoding="utf-8")
+            source_text, source_encoding = read_source_with_encoding(output_file)
 
         except UnicodeDecodeError:
-            reason = ("The file could not be read as UTF-8 text.")
-
+            reason = ("The file could not be read as UTF-8 or cp1254 text.")
             for transformation in file_transformations:
                 application_results.append(build_file_skip_result(transformation, reason))
             continue
 
 
         updated_source, file_results = (apply_transformations_to_source(source_text, file_transformations))
-        output_file.write_text(updated_source,encoding="utf-8")
+        output_file.write_text(updated_source,encoding=source_encoding)
         application_results.extend(file_results)
 
     return application_results
@@ -682,6 +800,15 @@ def save_application_report(application_results: List[Dict[str, Any]], transform
 
 
     output_file.write_text("\n".join(report_lines), encoding="utf-8")
+
+
+def read_source_with_encoding(file_path: Path) -> Tuple[str, str]:
+    try:
+        return (file_path.read_text(encoding="utf-8"),"utf-8")
+
+    except UnicodeDecodeError:
+        print(f"{file_path}: utf-8 olarak okunamadı, cp1254 denendi.")
+        return (file_path.read_text(encoding="cp1254"), "cp1254")
 
 
 def main() -> None:
