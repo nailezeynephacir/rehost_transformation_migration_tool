@@ -1,0 +1,87 @@
+## `parser.py` – Fonksiyonların Kısa Özeti
+
+`parser.py`, C/C++ kaynak kodundaki fonksiyonları ve koşullu derleme bloklarını (`#if`, `#ifdef`, `#else`, `#endif`) bulur. Yorumları ve string ifadelerini maskeleyerek parantez, süslü parantez ve direktiflerin yanlış algılanmasını önler.
+
+### Maskeleme ve normalizasyon
+
+* `mask_source_content(content, mask_literals)`
+  Kaynak koddaki yorumları boşluklarla maskeler. `mask_literals=True` ise string ve karakter sabitlerini de maskeler. Metin uzunluğunu ve satır sonlarını koruduğu için karakter indeksleri değişmez.
+
+* `mask_comments_and_literals(content)`
+  `mask_source_content()` fonksiyonunu çağırarak yorumları, stringleri ve karakter sabitlerini maskeler. Yapısal parsing sırasında kullanılır.
+
+* `mask_comments(content)`
+  Yalnızca yorumları maskeler; string ve karakter sabitlerini korur. Kod veya fonksiyon imzası karşılaştırmalarında kullanılır.
+
+* `normalize_function_signature(signature)`
+  Fonksiyon imzasındaki yorumları kaldırır ve art arda gelen whitespace karakterlerini tek boşluğa indirir. Böylece biçimlendirme farklarının eşleşmeyi etkilemesini azaltır.
+
+### Fonksiyon tespiti
+
+* `extract_function_name(signature)`
+  İmzadaki uygun üst seviye `(` karakterlerini inceler ve önlerindeki identifier’lardan fonksiyon adını bulur. `if`, `for`, `while`, `switch` ve `catch` gibi kontrol yapılarını fonksiyon saymaz.
+
+* `find_signature_start_index(text)`
+  Fonksiyon imzasının başlangıç konumunu belirler. Son üst seviye `;` karakterinden veya son preprocessor satırından sonraki konumu kullanır.
+
+* `has_top_level_assignment(text)`
+  Parantezlerin dışında `=` bulunup bulunmadığını kontrol eder. Böylece değişken initializer’larının veya lambda benzeri yapıların fonksiyon sanılmasını önler.
+
+* `find_function_regions(content)`
+  Üst seviye süslü parantezleri takip ederek fonksiyon tanımlarını bulur. Her fonksiyon için ad, imza, normalize edilmiş imza, başlangıç-bitiş ve gövde sınırlarını kaydeder. Dengesiz süslü parantezler için uyarı üretir.
+
+### Yardımcı fonksiyonlar
+
+* `remove_line_ending(text)`
+  Bir satırın sonundaki yalnızca `\r` ve `\n` karakterlerini kaldırır.
+
+* `branch_contains_only_includes(branch_text)`
+  Bir conditional dalındaki anlamlı satırların tamamının `#include` direktifi olup olmadığını kontrol eder. Boş satırlar ve yorumlar dikkate alınmaz.
+
+* `find_containing_function(block_start, block_end, functions)`
+  Verilen koşullu derleme bloğunu tamamen gövdesinde bulunduran fonksiyonu arar. Bulamazsa `None` döndürür.
+
+* `classify_conditional_scope(block, functions)`
+  Conditional bloğun kapsamını belirler:
+
+  * Fonksiyonun içindeyse `function`
+  * Dalların tamamı include içeriyorsa `include`
+  * Bunların dışındaysa `global`
+
+  Function scope için fonksiyon adı ve normalize edilmiş imza da kaydedilir.
+
+### Conditional blok parsing
+
+* `extract_conditional_blocks(content, functions=None)`
+  `#if`, `#ifdef`, `#ifndef`, `#elif`, `#else` ve `#endif` direktiflerini stack kullanarak eşleştirir. Her blok için dalları, kaynak konumlarını, satır numaralarını, scope bilgisini ve iç içe conditional içerip içermediğini kaydeder. Eşleşmeyen veya yinelenen direktifler için uyarı üretir.
+
+  Oluşturduğu önemli bilgiler:
+
+  * `original_branch`
+  * `alternative_branch`
+  * `full_text`
+  * `scope`
+  * `function_name`
+  * `contains_nested_conditionals`
+  * `contains_elif`
+  * `has_else`
+
+### Ana giriş fonksiyonları
+
+* `parse_source(content)`
+  Önce fonksiyon bölgelerini, ardından conditional blokları çıkarır. Sonuçları şu yapıda birleştirir:
+
+  ```python
+  {
+      "functions": [...],
+      "conditional_blocks": [...],
+      "warnings": [...]
+  }
+  ```
+
+* `parse_file(file_path)`
+  Verilen C/C++ dosyasının varlığını kontrol eder, UTF-8 olarak okur ve içeriği `parse_source()` fonksiyonuna gönderir.
+
+### Tek cümlelik genel özet
+
+> `parser.py`, C/C++ kodunun tamamını derinlemesine anlamaya çalışmadan; yorum ve literal kaynaklı yanlış eşleşmeleri önleyerek fonksiyonları ve koşullu derleme bloklarını güvenli biçimde tespit eden, konumlandıran ve scope bilgisiyle sınıflandıran muhafazakâr bir parser’dır.
