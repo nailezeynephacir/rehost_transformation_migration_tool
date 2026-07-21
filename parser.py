@@ -571,6 +571,10 @@ def parse_file(file_path: Path) -> Dict[str, Any]:
     if not file_path.exists():
         raise FileNotFoundError(f"Source file was not found: {file_path}")
 
-    content = file_path.read_text(encoding="utf-8")
+    try:
+        content = file_path.read_text(encoding="utf-8")
+    except UnicodeDecodeError:
+        print(f"{file_path}: utf-8 olarak okunamadı, cp1254 denendi.")
+        content = file_path.read_text(encoding="cp1254")
 
     return parse_source(content)
