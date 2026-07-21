@@ -30,12 +30,16 @@ SUPPORTED_SOURCE_EXTENSIONS = {
 
 
 def read_source_file(file_path: Path) -> str:
-    # Read one source file as UTF-8 text.
+    # Read one source file.
     if not file_path.exists():
         raise FileNotFoundError(f"Source file was not found: {file_path}")
 
-    return file_path.read_text(encoding="utf-8")
-    # short for: with open(file_path, "r", encoding="utf-8") as file: return file.read()
+    try:
+        return file_path.read_text(encoding="utf-8")
+    except UnicodeDecodeError:
+        print(f"{file_path} UTF-8 olarak okunamadı, cp1254 denendi.")
+        return file_path.read_text(encoding="cp1254")
+
 
 
 def read_support_file_content(file_path: Path) -> str:
@@ -44,7 +48,13 @@ def read_support_file_content(file_path: Path) -> str:
         raise FileNotFoundError(f"Support file was not found: {file_path}")
 
     # Satır sonundaki '\r\n' ya da '\n' hangisi varsa değişmesin diye readText() değil readByte() ile okuyup decode ile texte çevirdik.
-    return file_path.read_bytes().decode("utf-8")
+    file_bytes = file_path.read_bytes()
+
+    try:
+        return file_bytes.decode("utf-8")
+    except UnicodeDecodeError:
+        print(f"{file_path} UTF-8 olarak okunamadı, cp1254 denendi.")
+        return file_bytes.decode("cp1254")
 
 
 def find_source_files(source_directory: Path) -> Dict[str, Path]:
@@ -154,7 +164,6 @@ def select_matching_original_branch(block: Dict[str, Any], search_regions: List[
         )
 
     unique_matches = [result for result in branch_results if result["occurrence_count"] == 1]
-
     found_matches = [result for result in branch_results if result["occurrence_count"] > 0]
 
     # MODIFY: safe case çok safe ya
@@ -170,10 +179,7 @@ def select_matching_original_branch(block: Dict[str, Any], search_regions: List[
         return selected_block, None
 
     result_details = ", ".join(
-        (
-            f"{result['name']}: "
-            f"{result['occurrence_count']} match(es)"
-        )
+        (f"{result['name']}: {result['occurrence_count']} match(es)")
         for result in branch_results
     )
 
@@ -194,35 +200,254 @@ def select_matching_original_branch(block: Dict[str, Any], search_regions: List[
         f"Results: {result_details}."
     )
 
+# ----- ORIGINALDE OLMAYIP SADECE REHOSTTA OLAN KODLARI EKLEMEK İÇİN -----
+def determine_function_insertion_position(block: Dict[str, Any], rehost_source: str, rehost_functions: List[Dict[str, Any]]) -> Optional[str]:
+    # Determine whether a rehost-only conditional block is at the beginning or end of its containing function.
+    function_name = block.get("function_name")
+    function_signature = block.get("function_signature")
 
+    if function_name is None or function_signature is None:
+        return None
+
+    matching_function, error = find_matching_function(rehost_functions, function_name, function_signature)
+
+    if matching_function is None:
+        return None
+
+    code_before_block = rehost_source[matching_function["body_start"] + 1:block["start"]]
+    code_after_block = rehost_source[block["end"]:matching_function["body_end"] - 1]
+
+    if not normalize_code_text(code_before_block):
+        return "function_start"
+
+    if not normalize_code_text(code_after_block):
+        return "function_end"
+
+    return None
+
+
+def find_unique_following_anchor(block: Dict[str, Any], rehost_source: str, rehost_functions: List[Dict[str, Any]], original_search_regions: List[Dict[str, Any]]) -> Optional[str]:
+    # Find a unique piece of code after a rehost-only conditional  block so the block can be inserted immediately before it.
+    function_name = block.get("function_name")
+    function_signature = block.get("function_signature")
+
+    if function_name is None or function_signature is None:
+        return None
+
+    matching_function, error = find_matching_function(rehost_functions, function_name, function_signature)
+
+    if matching_function is None:
+        return None
+
+    code_after_block = rehost_source[block["end"]:matching_function["body_end"] - 1]
+
+    candidate_lines = []
+    meaningful_line_count = 0
+
+    for line in code_after_block.splitlines(keepends=True):
+        candidate_lines.append(line)
+
+        # Empty lines and comments do not make an anchor reliable.
+        if not normalize_code_text(line):
+            continue
+
+        meaningful_line_count += 1
+        candidate_text = "".join(candidate_lines).strip()
+        occurrence_count = count_normalized_occurrences(original_search_regions, candidate_text)
+
+        if occurrence_count == 1:
+            return candidate_text
+
+        # If the candidate does not exist at all, extending it cannot turn it into a valid continuous match.
+        if occurrence_count == 0:
+            return None
+
+        # Avoid using an unnecessarily large anchor.
+        if meaningful_line_count >= 5:
+            return None
+
+    return None
+
+
+def find_unique_preceding_anchor(block: Dict[str, Any], rehost_source: str, rehost_functions: List[Dict[str, Any]], original_search_regions: List[Dict[str, Any]]) -> Optional[str]:
+    # Find a unique piece of code before a rehost-only conditional block so the block can be inserted immediately after it.
+    function_name = block.get("function_name")
+    function_signature = block.get("function_signature")
+
+    if function_name is None or function_signature is None:
+        return None
+
+    matching_function, error = find_matching_function(rehost_functions,function_name,function_signature)
+
+    if matching_function is None:
+        return None
+
+    code_before_block = rehost_source[matching_function["body_start"] + 1:block["start"]]
+    lines_before_block = code_before_block.splitlines(keepends=True)
+
+    candidate_lines = []
+    meaningful_line_count = 0
+
+    # Start with the line closest to the conditional block and gradually extend the candidate upward.
+    for line in reversed(lines_before_block):
+        candidate_lines.insert(0, line)
+
+        # Empty lines and comments do not make an anchor reliable.
+        if not normalize_code_text(line):
+            continue
+
+        meaningful_line_count += 1
+        candidate_text = "".join(candidate_lines).strip()
+        occurrence_count = count_normalized_occurrences(original_search_regions, candidate_text)
+
+        if occurrence_count == 1:
+            return candidate_text
+
+        # If the closest candidate does not exist in the original, extending it upward cannot produce a continuous match.
+        if occurrence_count == 0:
+            return None
+
+        # Avoid using an unnecessarily large anchor.
+        if meaningful_line_count >= 5:
+            return None
+    return None
+
+def find_containing_non_function_region(block: Dict[str, Any],rehost_source: str,rehost_functions: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    # Find the non-function source region that completely contains the conditional block.
+    non_function_regions = build_non_function_regions(rehost_source, rehost_functions)
+
+    for region in non_function_regions:
+        if (region["start"] <= block["start"] and block["end"] <= region["end"]):
+            return region
+    return None
+
+def find_unique_following_non_function_anchor(block: Dict[str, Any],rehost_source: str,rehost_functions: List[Dict[str, Any]],original_search_regions: List[Dict[str, Any]]) -> Optional[str]:
+    # Find a unique file-level code fragment after a rehost-only conditional block.
+    containing_region = find_containing_non_function_region(block=block, rehost_source=rehost_source, rehost_functions=rehost_functions)
+
+    if containing_region is None:
+        return None
+
+    code_after_block = rehost_source[block["end"]:containing_region["end"]]
+
+    candidate_lines = []
+    meaningful_line_count = 0
+
+    for line in code_after_block.splitlines(keepends=True):
+        candidate_lines.append(line)
+
+        if not normalize_code_text(line):
+            continue
+
+        meaningful_line_count += 1
+        candidate_text = "".join(candidate_lines).strip()
+
+        occurrence_count = count_normalized_occurrences(original_search_regions, candidate_text)
+
+        if occurrence_count == 1:
+            return candidate_text
+
+        if occurrence_count == 0:
+            return None
+
+        if meaningful_line_count >= 5:
+            return None
+
+    return None
+
+def find_unique_preceding_non_function_anchor(block: Dict[str, Any],rehost_source: str,rehost_functions: List[Dict[str, Any]],original_search_regions: List[Dict[str, Any]]) -> Optional[str]:
+    # Find a unique file-level code fragment before a rehost-only conditional block.
+
+    containing_region = find_containing_non_function_region(block=block, rehost_source=rehost_source, rehost_functions=rehost_functions)
+
+    if containing_region is None:
+        return None
+
+    code_before_block = rehost_source[containing_region["start"]:block["start"]]
+    lines_before_block = code_before_block.splitlines(keepends=True)
+
+    candidate_lines = []
+    meaningful_line_count = 0
+
+    for line in reversed(lines_before_block):
+        candidate_lines.insert(0, line)
+
+        if not normalize_code_text(line):
+            continue
+
+        meaningful_line_count += 1
+        candidate_text = "".join(candidate_lines).strip()
+
+        occurrence_count = count_normalized_occurrences(original_search_regions, candidate_text)
+
+        if occurrence_count == 1:
+            return candidate_text
+
+        if occurrence_count == 0:
+            return None
+
+        if meaningful_line_count >= 5:
+            return None
+
+    return None
+# ------------------------------------------------------------------------
+
+# ----- build transformations --------------------------------------------
 def build_transformation(transformation_number: int, relative_file_path: str, block: Dict[str, Any]) -> Dict[str, Any]:
     # Store only information required by apply_transformations.py.
     transformation = {
-        "id": (
-            f"conditional_"
-            f"{transformation_number}"
-        ),
+        "id": (f"conditional_{transformation_number}"),
         "file": relative_file_path,
         "scope": block["scope"],
-        "match": (
-            block["original_branch"].strip()
-        ),
-        "replacement": (
-            block["full_text"].strip()
-        )
+        "match": (block["original_branch"].strip()),
+        "replacement": (block["full_text"].strip())
     }
 
     # Function information is required only for function-scope transformations.
     if block["scope"] == "function":
         transformation["function"] = {
             "name": block["function_name"],
-            "signature": (
-                block["function_signature"]
-            )
+            "signature": (block["function_signature"])
+        }
+    return transformation
+
+
+def build_insertion_transformation(transformation_number: int, relative_file_path: str, block: Dict[str, Any], position: str) -> Dict[str, Any]:
+    # Store a rehost-only conditional block as a positional insertion.
+    return {
+        "id": f"conditional_{transformation_number}",
+        "file": relative_file_path,
+        "scope": "function",
+        "operation": "insert",
+        "position": position,
+        "content": block["full_text"].strip(),
+        "function": {
+            "name": block["function_name"],
+            "signature": block["function_signature"],
+        },
+    }
+
+def build_anchor_insertion_transformation(transformation_number: int, relative_file_path: str, block: Dict[str, Any], position: str, anchor: str) -> Dict[str, Any]:
+    # Store a rehost-only conditional block as an insertion immediately before or after a unique anchor.
+    transformation = {
+        "id": f"conditional_{transformation_number}",
+        "file": relative_file_path,
+        "scope": block["scope"],
+        "operation": "insert",
+        "position": position,
+        "anchor": anchor,
+        "content": block["full_text"].strip(),
+    }
+
+    # Function information is needed only for function-scope insertions.
+    if block["scope"] == "function":
+        transformation["function"] = {
+            "name": block["function_name"],
+            "signature": block["function_signature"],
         }
 
     return transformation
-
+# ------------------------------------------------------------------------
 
 def build_report_entry(relative_file_path: str, block: Dict[str, Any], result: str, reason: str, transformation_id: Optional[str] = None) -> Dict[str, Any]:
     # Keep extraction details outside the transformation JSON.
@@ -238,16 +463,15 @@ def build_report_entry(relative_file_path: str, block: Dict[str, Any], result: s
     }
 
 
-def extract_transformations(original_source: str, original_parse_result: Dict[str, Any], rehost_parse_result: Dict[str, Any], relative_file_path: str, starting_transformation_number: int
+def extract_transformations(original_source: str, rehost_source: str, original_parse_result: Dict[str, Any], rehost_parse_result: Dict[str, Any], relative_file_path: str, starting_transformation_number: int
 ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
     # Verify each conditional block from the old rehost file against the old original file.
     transformations = []
     report_entries = []
 
     original_functions = (original_parse_result["functions"])
-
     conditional_blocks = (rehost_parse_result["conditional_blocks"])
-
+    rehost_functions = rehost_parse_result["functions"]
     parser_warnings = (original_parse_result["warnings"] + rehost_parse_result["warnings"])
 
     # Parser warnings mean that source boundaries may be unreliable.
@@ -308,12 +532,105 @@ def extract_transformations(original_source: str, original_parse_result: Dict[st
         (selected_block, branch_selection_error) = select_matching_original_branch(block, search_regions)
 
         if selected_block is None:
+            branch_candidates = [block.get("original_branch"), block.get("alternative_branch"),]
+
+            branches_are_absent = all(
+                (
+                    not isinstance(branch_text, str)
+                    or not normalize_code_text(branch_text)
+                    or count_normalized_occurrences(search_regions,branch_text) == 0
+                )
+                for branch_text in branch_candidates
+            )
+
+            # Insertion is allowed only when neither conditional branch exists in the old original source.
+            if branches_are_absent:
+                insertion_position = None
+                insertion_anchor = None
+
+                if block["scope"] == "function":
+                    # First try a reliable function boundary.
+                    insertion_position = (determine_function_insertion_position(block=block, rehost_source=rehost_source, rehost_functions=rehost_functions))
+
+                    # If the block is in the middle of the function, try the following code as an anchor.
+                    if insertion_position is None:
+                        insertion_anchor = (find_unique_following_anchor(block=block, rehost_source=rehost_source, rehost_functions=rehost_functions, original_search_regions=search_regions))
+
+                        if insertion_anchor is not None:
+                            insertion_position = "before"
+
+                    # If the following anchor is unavailable, try the preceding code.
+                    if insertion_position is None:
+                        insertion_anchor = (find_unique_preceding_anchor(block=block, rehost_source=rehost_source, rehost_functions=rehost_functions, original_search_regions=search_regions))
+
+                        if insertion_anchor is not None:
+                            insertion_position = "after"
+
+                elif block["scope"] in {"include", "global"}:
+                    # Function-external blocks first try the following non-function code as an anchor.
+                    insertion_anchor = (find_unique_following_non_function_anchor(block=block, rehost_source=rehost_source, rehost_functions=rehost_functions, original_search_regions=search_regions))
+
+                    if insertion_anchor is not None:
+                        insertion_position = "before"
+
+                    # If unavailable, try the preceding non-function code.
+                    else:
+                        insertion_anchor = (
+                            find_unique_preceding_non_function_anchor(block=block, rehost_source=rehost_source, rehost_functions=rehost_functions, original_search_regions=search_regions))
+
+                        if insertion_anchor is not None:
+                            insertion_position = "after"
+
+                transformation = None
+
+                if insertion_position in {"function_start", "function_end"}:
+                    transformation = (
+                        build_insertion_transformation(
+                            transformation_number=(starting_transformation_number + len(transformations)),
+                            relative_file_path=relative_file_path,
+                            block=block,
+                            position=insertion_position
+                        )
+                    )
+
+                elif (
+                    insertion_position in {"before", "after"} and insertion_anchor is not None
+                ):
+                    transformation = (
+                        build_anchor_insertion_transformation(
+                            transformation_number=(starting_transformation_number + len(transformations)),
+                            relative_file_path=relative_file_path,
+                            block=block,
+                            position=insertion_position,
+                            anchor=insertion_anchor
+                        )
+                    )
+
+                if transformation is not None:
+                    transformations.append(transformation)
+
+                    report_entries.append(
+                        build_report_entry(
+                            relative_file_path,
+                            block,
+                            result="CREATED",
+                            reason=("Neither conditional branch exists in the old original source. The complete block "
+                                f"was stored as a {insertion_position} insertion."),
+                            transformation_id=transformation["id"]
+                        )
+                    )
+
+                    continue
+
             report_entries.append(
                 build_report_entry(
                     relative_file_path,
                     block,
                     result="SKIPPED",
-                    reason=(branch_selection_error or "The original branch could not be identified.")
+                    reason=(
+                        branch_selection_error
+                        or "No unique and reliable insertion point was found."
+                    )
                 )
             )
 
@@ -332,7 +649,7 @@ def extract_transformations(original_source: str, original_parse_result: Dict[st
                 relative_file_path,
                 selected_block,
                 result="CREATED",
-                reason=("Exactly one conditional branch was found once in the expected scope."),
+                reason=("Conditional branch was found in the expected scope."),
                 transformation_id=(transformation["id"])
             )
         )
@@ -354,10 +671,7 @@ def build_support_files(rehost_only_paths: List[str], rehost_files: Dict[str, Pa
             content = read_support_file_content(support_file_path)
 
         except (OSError, UnicodeDecodeError) as error:
-            reason = (
-                "The rehost-only file could not be stored "
-                f"as UTF-8 content: {error}"
-            )
+            reason = (f"The rehost-only file could not be stored as UTF-8 or cp1254 content: {error}")
 
             report_entries.append(
                 {
@@ -429,14 +743,8 @@ def save_extraction_report(report_entries: List[Dict[str, Any]], support_file_en
         f"Detected conditional blocks: {detected_block_count}",
         f"Created transformations: {created_count}",
         f"Skipped blocks: {skipped_count}",
-        (
-            "Support files stored in JSON: "
-            f"{stored_support_file_count}"
-        ),
-        (
-            "Support files skipped: "
-            f"{skipped_support_file_count}"
-        ),
+        (f"Support files stored in JSON: {stored_support_file_count}"),
+        (f"Support files skipped: {skipped_support_file_count}"),
         f"Warnings: {len(parser_warnings)}",
         ""
     ]
@@ -562,34 +870,23 @@ def main() -> None:
 
         try:
             original_source = read_source_file(original_file)
+            rehost_source = read_source_file(rehost_file)
+            
             original_parse_result = parse_file(original_file)
             rehost_parse_result = parse_file(rehost_file)
 
         except (OSError, UnicodeDecodeError, ValueError) as error:
-            all_warnings.append(
-                f"{relative_file_path}: "
-                f"The file pair could not be processed: "
-                f"{error}"
-            )
-
+            all_warnings.append(f"{relative_file_path}: The file pair could not be processed: {error}")
             continue
 
-        (file_transformations,
-            file_report_entries
+        (file_transformations, file_report_entries
         ) = extract_transformations(
             original_source=original_source,
-            original_parse_result=(
-                original_parse_result
-            ),
-            rehost_parse_result=(
-                rehost_parse_result
-            ),
-            relative_file_path=(
-                relative_file_path
-            ),
-            starting_transformation_number=(
-                next_transformation_number
-            )
+            rehost_source=rehost_source,
+            original_parse_result=(original_parse_result),
+            rehost_parse_result=(rehost_parse_result),
+            relative_file_path=(relative_file_path),
+            starting_transformation_number=(next_transformation_number)
         )
 
         all_transformations.extend(file_transformations)
@@ -627,18 +924,9 @@ def main() -> None:
         )
 
     # Rehost-only files are complete support files rather than conditional transformations. Store their content in the JSON.
-    (
-        all_support_files,
-        all_support_file_entries,
-        support_file_warnings
-    ) = build_support_files(
-        rehost_only_paths,
-        rehost_files
-    )
+    (all_support_files, all_support_file_entries, support_file_warnings) = build_support_files(rehost_only_paths, rehost_files)
 
-    all_warnings.extend(
-        support_file_warnings
-    )
+    all_warnings.extend(support_file_warnings)
 
     save_transformations_json(
         transformations=all_transformations,
