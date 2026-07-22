@@ -312,6 +312,21 @@ def find_unique_preceding_anchor(block: Dict[str, Any], rehost_source: str, reho
             return None
     return None
 
+
+def contains_preprocessor_directive(text: str) -> bool:
+    # Check whether the candidate anchor contains a preprocessor directive.
+    for line in text.splitlines():
+        normalized_line = normalize_code_text(line)
+
+        if not normalized_line:
+            continue
+
+        if normalized_line.startswith("#"):
+            return True
+
+    return False
+
+
 def find_containing_non_function_region(block: Dict[str, Any],rehost_source: str,rehost_functions: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
     # Find the non-function source region that completely contains the conditional block.
     non_function_regions = build_non_function_regions(rehost_source, rehost_functions)
@@ -320,6 +335,7 @@ def find_containing_non_function_region(block: Dict[str, Any],rehost_source: str
         if (region["start"] <= block["start"] and block["end"] <= region["end"]):
             return region
     return None
+
 
 def find_unique_following_non_function_anchor(block: Dict[str, Any],rehost_source: str,rehost_functions: List[Dict[str, Any]],original_search_regions: List[Dict[str, Any]]) -> Optional[str]:
     # Find a unique file-level code fragment after a rehost-only conditional block.
@@ -342,6 +358,10 @@ def find_unique_following_non_function_anchor(block: Dict[str, Any],rehost_sourc
         meaningful_line_count += 1
         candidate_text = "".join(candidate_lines).strip()
 
+        # header'ın adı falan değişebileceği için bunu anchor olarak kullanmayacağız.
+        if (block.get("inside_header_guard", False) and contains_preprocessor_directive(candidate_text)):
+            return None
+        
         occurrence_count = count_normalized_occurrences(original_search_regions, candidate_text)
 
         if occurrence_count == 1:
@@ -378,6 +398,10 @@ def find_unique_preceding_non_function_anchor(block: Dict[str, Any],rehost_sourc
         meaningful_line_count += 1
         candidate_text = "".join(candidate_lines).strip()
 
+        # header'ın adı falan değişebileceği için bunu anchor olarak kullanmayacağız.
+        if (block.get("inside_header_guard", False) and contains_preprocessor_directive(candidate_text)):
+            return None
+        
         occurrence_count = count_normalized_occurrences(original_search_regions, candidate_text)
 
         if occurrence_count == 1:
