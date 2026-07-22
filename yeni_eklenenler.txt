@@ -1,0 +1,10 @@
+parser ->
+find_header_guard_block
+annotate_header_guard_context
+
+
+extract ->
+transformation_candidate_blocks eklendi, direkt conditional_blocks kullanıyorduk daha önce şimdi conditional blocksdan header olanı çıkarıp
+transformation_candidate_blocks oluşturuyoruz.
+
+kontrollerde bununla ilgili ufak değişiklikler yapıldı.
