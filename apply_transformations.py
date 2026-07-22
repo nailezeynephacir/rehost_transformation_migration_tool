@@ -814,9 +814,6 @@ def save_application_report(application_results: List[Dict[str, Any]], transform
 
             report_lines.append("")
 
-        if result["result"] == "APPLIED":
-            report_lines.extend([(f"Original character range: {result['start']}:{result['end']}"), ""])
-
         else:
             expected_match = str(result.get("expected_match", ""))
 
