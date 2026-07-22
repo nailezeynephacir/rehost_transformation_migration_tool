@@ -480,13 +480,14 @@ def extract_transformations(original_source: str, rehost_source: str, original_p
 
     original_functions = (original_parse_result["functions"])
     conditional_blocks = (rehost_parse_result["conditional_blocks"])
+    transformation_candidate_blocks = [block for block in conditional_blocks if not block["is_header_guard"]]
     rehost_functions = rehost_parse_result["functions"]
     parser_warnings = (original_parse_result["warnings"] + rehost_parse_result["warnings"])
 
     # Parser warnings mean that source boundaries may be unreliable.
     # Skip every block from the file instead of producing transformations from partially parsed input.
     if parser_warnings:
-        for block in conditional_blocks:
+        for block in transformation_candidate_blocks:
             report_entries.append(
                 build_report_entry(
                     relative_file_path,
@@ -497,7 +498,7 @@ def extract_transformations(original_source: str, rehost_source: str, original_p
             )
         return transformations, report_entries
 
-    for block in conditional_blocks:
+    for block in transformation_candidate_blocks:
         # Multiple alternative branches are not supported yet.
         if block["contains_elif"]:
             report_entries.append(
@@ -512,18 +513,19 @@ def extract_transformations(original_source: str, rehost_source: str, original_p
 
         # Nested transformations may overlap.
         # They are skipped until overlap handling is added.
-        if (block["contains_nested_conditionals"] or block["nesting_depth"] > 0):
+        # header girmiyor buraya. o kısım nested sayılmıyor
+        if (block["contains_real_nested_conditionals"] or block["effective_nesting_depth"] > 0):
             report_entries.append(
                 build_report_entry(
                     relative_file_path,
                     block,
                     result="SKIPPED",
-                    reason=("Nested conditional blocks are not supported yet.")
+                    reason=("The conditional block has real nested conditional structure and is not supported yet.")
                 )
             )
             continue
 
-        # if not contains #elif or nested
+        # if not contains #elif
         search_regions, search_error = (get_original_search_regions(block, original_source, original_functions))
 
         if search_regions is None:
