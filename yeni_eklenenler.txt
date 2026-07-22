@@ -8,3 +8,6 @@ transformation_candidate_blocks eklendi, direkt conditional_blocks kullanıyordu
 transformation_candidate_blocks oluşturuyoruz.
 
 kontrollerde bununla ilgili ufak değişiklikler yapıldı.
+
+
+extract kısmında anchor seçimlerinde header eklenmesin diye kontroller eklendi.
