@@ -11,6 +11,14 @@ ENDIF_DIRECTIVE_PATTERN = re.compile(r"^[ \t]*#[ \t]*endif\b")
 
 INCLUDE_DIRECTIVE_PATTERN = re.compile(r"^[ \t]*#[ \t]*include\b")
 
+# nested için
+DEFINE_DIRECTIVE_PATTERN = re.compile(
+    r"^[ \t]*#[ \t]*define[ \t]+"
+    r"([A-Za-z_][A-Za-z0-9_]*)"
+    r"(?:[ \t]+.*)?$"
+)
+SIMPLE_MACRO_NAME_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
 # These constructs may contain parentheses and braces, but they are not function definitions.
 CONTROL_KEYWORDS = {
     "if",
@@ -410,6 +418,117 @@ def classify_conditional_scope(block: Dict[str, Any], functions: List[Dict[str, 
     }
 
 
+
+def find_header_guard_block(content: str, blocks: List[Dict[str, Any]],) -> Optional[Dict[str, Any]]:
+    # Find a conventional file-wide header guard:
+    # #ifndef MACRO_NAME
+    # #define MACRO_NAME
+    # ...
+    # #endif
+
+    # Blok top-level mı? Hayır → geç
+    # Direktif #ifndef mı? Hayır → geç
+    # Condition tek bir makro adı mı? Hayır → geç
+    # Bloktan önce yalnızca yorum/boşluk mu var? Hayır → geç
+    # Bloktan sonra yalnızca yorum/boşluk mu var? Hayır → geç
+    # #ifndef sonrasındaki ilk anlamlı satır #define mı? Hayır → geç
+    # #define edilen isim, #ifndef içindeki isimle aynı mı? Hayır → geç /Evet → bu blok header guard
+
+    masked_content = mask_comments_and_literals(content)
+
+    # bütün çıkan conditional blocklara bakacak
+    for block in blocks:
+        if block["nesting_depth"] != 0: # header guard en üstte olur
+            continue
+
+        if block["directive"] != "ifndef":  # şu an sadece ifndef kabul ediyoruz
+            continue
+
+        guard_macro = block["condition"]
+
+        if SIMPLE_MACRO_NAME_PATTERN.fullmatch(guard_macro) is None:
+            continue
+        # şu an regex ile kabul edilenler: SENSOR_H, _SENSOR_H, SensorHeader, SENSOR_DRIVER_H2
+        # şu an regex ile reddedilenler: defined(SENSOR_H), !defined(SENSOR_H), SENSOR_H && FEATURE_X, SENSOR-H
+
+        content_before_guard = masked_content[:block["start"]]
+        content_after_guard = masked_content[block["end"]:]
+
+        # A UTF-8 BOM may appear at the beginning of a source file.
+        if content_before_guard.strip(" \t\r\n\ufeff"):
+            continue
+
+        if content_after_guard.strip():
+            continue
+
+        masked_original_branch = mask_comments_and_literals(block["original_branch"])
+
+        first_meaningful_line = None
+
+        for line in masked_original_branch.splitlines():
+            stripped_line = line.strip()
+
+            if stripped_line:
+                first_meaningful_line = stripped_line
+                break
+
+        if first_meaningful_line is None:
+            continue
+
+        define_match = DEFINE_DIRECTIVE_PATTERN.fullmatch(first_meaningful_line)
+
+        if define_match is None:
+            continue
+
+        defined_macro = define_match.group(1)
+
+        if defined_macro != guard_macro:
+            continue
+
+        return block
+
+    return None
+
+
+def annotate_header_guard_context(content: str, blocks: List[Dict[str, Any]],) -> None:
+    # Mark the file-wide header guard and calculate nesting depth without counting that guard as a real conditional level.
+
+    header_guard = find_header_guard_block(content, blocks,)
+
+    for block in blocks:
+        is_header_guard = (
+            header_guard is not None
+            and block["start"] == header_guard["start"]
+            and block["end"] == header_guard["end"]
+        )
+
+        inside_header_guard = (
+            header_guard is not None
+            and not is_header_guard
+            and header_guard["start"] < block["start"]
+            and block["end"] <= header_guard["end"]
+        )
+
+        effective_nesting_depth = block["nesting_depth"]
+
+        if inside_header_guard:
+            effective_nesting_depth -= 1
+
+        block["is_header_guard"] = is_header_guard
+        block["inside_header_guard"] = inside_header_guard
+        block["effective_nesting_depth"] = effective_nesting_depth
+
+    for block in blocks:
+        block["contains_real_nested_conditionals"] = any(
+            block["start"] < child_block["start"]
+            and child_block["end"] < block["end"]
+            and child_block["nesting_depth"] == block["nesting_depth"] + 1
+            and child_block["effective_nesting_depth"]
+            == block["effective_nesting_depth"] + 1
+            for child_block in blocks
+        )
+
+
 def extract_conditional_blocks(content: str, functions: Optional[List[Dict[str, Any]]] = None
 ) -> Tuple[List[Dict[str, Any]], List[str]]:
     # #if / #ifdef / #ifndef buluyor.
@@ -549,6 +668,7 @@ def extract_conditional_blocks(content: str, functions: Optional[List[Dict[str, 
         warnings.append(f"Conditional block opened at line {pending_block['opening_line_number']} does not have a matching #endif.")
 
     blocks.sort(key=lambda block: block["start"])
+    annotate_header_guard_context(content, blocks,)
 
     return blocks, warnings
 
