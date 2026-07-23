@@ -1,6 +1,6 @@
 from pathlib import Path
 import re
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, Set
 
 
 # Preprocessor directive patterns used by the conditional block parser.
@@ -11,13 +11,7 @@ ENDIF_DIRECTIVE_PATTERN = re.compile(r"^[ \t]*#[ \t]*endif\b")
 
 INCLUDE_DIRECTIVE_PATTERN = re.compile(r"^[ \t]*#[ \t]*include\b")
 
-# nested için
-DEFINE_DIRECTIVE_PATTERN = re.compile(
-    r"^[ \t]*#[ \t]*define[ \t]+"
-    r"([A-Za-z_][A-Za-z0-9_]*)"
-    r"(?:[ \t]+.*)?$"
-)
-SIMPLE_MACRO_NAME_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+MACRO_IDENTIFIER_PATTERN = re.compile(r"\b[A-Za-z_][A-Za-z0-9_]*\b")
 
 # These constructs may contain parentheses and braces, but they are not function definitions.
 CONTROL_KEYWORDS = {
@@ -399,12 +393,12 @@ def classify_conditional_scope(block: Dict[str, Any], functions: List[Dict[str, 
             "function_signature": (containing_function["normalized_signature"]),
         }
 
-    branches = [block["original_branch"]]   # original as in first branch
+    branch_contents = [branch["content"] for branch in block["branches"]]
 
-    if (block["alternative_branch"] is not None):
-        branches.append(block["alternative_branch"])
-
-    if all(branch_contains_only_includes(branch) for branch in branches):
+    if all(
+        branch_contains_only_includes(branch_content)
+        for branch_content in branch_contents
+    ):
         return {
             "scope": "include",
             "function_name": None,
@@ -418,118 +412,7 @@ def classify_conditional_scope(block: Dict[str, Any], functions: List[Dict[str, 
     }
 
 
-
-def find_header_guard_block(content: str, blocks: List[Dict[str, Any]],) -> Optional[Dict[str, Any]]:
-    # Find a conventional file-wide header guard:
-    # #ifndef MACRO_NAME
-    # #define MACRO_NAME
-    # ...
-    # #endif
-
-    # Blok top-level mı? Hayır → geç
-    # Direktif #ifndef mı? Hayır → geç
-    # Condition tek bir makro adı mı? Hayır → geç
-    # Bloktan önce yalnızca yorum/boşluk mu var? Hayır → geç
-    # Bloktan sonra yalnızca yorum/boşluk mu var? Hayır → geç
-    # #ifndef sonrasındaki ilk anlamlı satır #define mı? Hayır → geç
-    # #define edilen isim, #ifndef içindeki isimle aynı mı? Hayır → geç /Evet → bu blok header guard
-
-    masked_content = mask_comments_and_literals(content)
-
-    # bütün çıkan conditional blocklara bakacak
-    for block in blocks:
-        if block["nesting_depth"] != 0: # header guard en üstte olur
-            continue
-
-        if block["directive"] != "ifndef":  # şu an sadece ifndef kabul ediyoruz
-            continue
-
-        guard_macro = block["condition"]
-
-        if SIMPLE_MACRO_NAME_PATTERN.fullmatch(guard_macro) is None:
-            continue
-        # şu an regex ile kabul edilenler: SENSOR_H, _SENSOR_H, SensorHeader, SENSOR_DRIVER_H2
-        # şu an regex ile reddedilenler: defined(SENSOR_H), !defined(SENSOR_H), SENSOR_H && FEATURE_X, SENSOR-H
-
-        content_before_guard = masked_content[:block["start"]]
-        content_after_guard = masked_content[block["end"]:]
-
-        # A UTF-8 BOM may appear at the beginning of a source file.
-        if content_before_guard.strip(" \t\r\n\ufeff"):
-            continue
-
-        if content_after_guard.strip():
-            continue
-
-        masked_original_branch = mask_comments_and_literals(block["original_branch"])
-
-        first_meaningful_line = None
-
-        for line in masked_original_branch.splitlines():
-            stripped_line = line.strip()
-
-            if stripped_line:
-                first_meaningful_line = stripped_line
-                break
-
-        if first_meaningful_line is None:
-            continue
-
-        define_match = DEFINE_DIRECTIVE_PATTERN.fullmatch(first_meaningful_line)
-
-        if define_match is None:
-            continue
-
-        defined_macro = define_match.group(1)
-
-        if defined_macro != guard_macro:
-            continue
-
-        return block
-
-    return None
-
-
-def annotate_header_guard_context(content: str, blocks: List[Dict[str, Any]],) -> None:
-    # Mark the file-wide header guard and calculate nesting depth without counting that guard as a real conditional level.
-
-    header_guard = find_header_guard_block(content, blocks,)
-
-    for block in blocks:
-        is_header_guard = (
-            header_guard is not None
-            and block["start"] == header_guard["start"]
-            and block["end"] == header_guard["end"]
-        )
-
-        inside_header_guard = (
-            header_guard is not None
-            and not is_header_guard
-            and header_guard["start"] < block["start"]
-            and block["end"] <= header_guard["end"]
-        )
-
-        effective_nesting_depth = block["nesting_depth"]
-
-        if inside_header_guard:
-            effective_nesting_depth -= 1
-
-        block["is_header_guard"] = is_header_guard
-        block["inside_header_guard"] = inside_header_guard
-        block["effective_nesting_depth"] = effective_nesting_depth
-
-    for block in blocks:
-        block["contains_real_nested_conditionals"] = any(
-            block["start"] < child_block["start"]
-            and child_block["end"] < block["end"]
-            and child_block["nesting_depth"] == block["nesting_depth"] + 1
-            and child_block["effective_nesting_depth"]
-            == block["effective_nesting_depth"] + 1
-            for child_block in blocks
-        )
-
-
-def extract_conditional_blocks(content: str, functions: Optional[List[Dict[str, Any]]] = None
+def extract_conditional_blocks(content: str, functions: Optional[List[Dict[str, Any]]] = None, target_macros: Optional[Set[str]] = None,
 ) -> Tuple[List[Dict[str, Any]], List[str]]:
     # #if / #ifdef / #ifndef buluyor.
     # girdi olarak tüm metni ve çıkarttığımız fonksiyon listesini alıyor.
@@ -537,6 +420,9 @@ def extract_conditional_blocks(content: str, functions: Optional[List[Dict[str, 
 
     # Find conditional compilation blocks with a stack.
     # Stack-based parsing allows nested #if blocks to be matched with the correct #endif.
+    if target_macros is None:
+        target_macros = set()
+    
     if functions is None:
         functions, function_warnings = (find_function_regions(content))
 
@@ -551,150 +437,291 @@ def extract_conditional_blocks(content: str, functions: Optional[List[Dict[str, 
     original_lines = content.splitlines(keepends=True)
     masked_lines = (mask_comments_and_literals(content).splitlines(keepends=True))
 
-    line_start = 0
+    logical_lines = []
 
-    # original ve masked eşleştiriliyor.
-    for line_number, (original_line, masked_line) in enumerate(zip(original_lines, masked_lines), start=1):
+    physical_line_index = 0
+    character_index = 0
 
-        directive_line = (remove_line_ending(masked_line))
-        opening_match = (OPENING_DIRECTIVE_PATTERN.match(directive_line))
+    while physical_line_index < len(original_lines):
+        line_number = physical_line_index + 1
+        line_start = character_index
+
+        original_line = original_lines[physical_line_index]
+        masked_line = masked_lines[physical_line_index]
+
+        logical_original_line = original_line
+        logical_masked_line = remove_line_ending(masked_line)
+
+        is_preprocessor_line = (logical_masked_line.lstrip().startswith("#"))
+
+        while (is_preprocessor_line and logical_masked_line.endswith("\\")):
+            if physical_line_index + 1 >= len(original_lines):
+                warnings.append(f"Preprocessor directive at line {line_number} ends with a continuation character but has no following line.")
+                break
+
+            physical_line_index += 1
+
+            next_original_line = original_lines[physical_line_index]
+            next_masked_line = masked_lines[physical_line_index]
+
+            logical_original_line += next_original_line
+
+            logical_masked_line = (logical_masked_line[:-1] + " " + remove_line_ending(next_masked_line).lstrip())
+
+        character_index += len(logical_original_line)
+
+        logical_lines.append(
+            {
+                "original_line": logical_original_line,
+                "directive_line": logical_masked_line,
+                "start": line_start,
+                "line_number": line_number,
+            }
+        )
+
+        physical_line_index += 1
+
+    for logical_line in logical_lines:
+        original_line = logical_line["original_line"]
+        directive_line = logical_line["directive_line"]
+        line_start = logical_line["start"]
+        line_number = logical_line["line_number"]
+
+        opening_match = OPENING_DIRECTIVE_PATTERN.match(directive_line)
         # #ifdef REHOST_MODE ---> opening_match.group(1)="ifdef", opening_match.group(2)= " REHOST_MODE"
 
         if opening_match is not None:
-            if stack:   # stack boş değilse nested
-                stack[-1]["contains_nested_conditionals"] = True
-                # stack[-1] üstteki ifdef. ondaki nested var bilgisini true yapıyoruz
+            directive = opening_match.group(1)
+            condition = opening_match.group(2).strip()
+            referenced_macros = extract_referenced_macros(condition)
+
+            matched_target_macros = referenced_macros & target_macros
+
+            parent_start = stack[-1]["start"] if stack else None
 
             stack.append(
-                {
-                    "directive": (opening_match.group(1)),
-                    "condition": (opening_match.group(2).strip()),
-                    "opening_line": (remove_line_ending(original_line).strip()),
-                    "start": line_start,
-                    "opening_line_end": (line_start + len(original_line)),
-                    "opening_line_number": (line_number),
-                    "else_start": None,
-                    "else_line_end": None,
-                    "else_line_number": None,
-                    "elif_lines": [],
-                    "nesting_depth": len(stack),
-                    "contains_nested_conditionals": (False),
-                }
-            )
+            {
+                "start": line_start,
+                "opening_line": remove_line_ending(original_line).strip(),
+                "opening_line_number": line_number,
+                "parent_start": parent_start,
+                "branches": [
+                    {
+                        "directive": directive,
+                        "condition": condition,
+                        "referenced_macros": sorted(referenced_macros),
+                        "matched_target_macros": sorted(matched_target_macros),
+                        "is_target": bool(matched_target_macros),
+                        "directive_line": remove_line_ending(original_line).strip(),
+                        "directive_start": line_start,
+                        "directive_end": line_start + len(original_line),
+                        "line_number": line_number,
+                        "content_start": line_start + len(original_line),
+                        "content_end": None,
+                    }
+                ],
+            }
+        )
 
-            line_start += len(original_line)
             continue
 
-        if ELIF_DIRECTIVE_PATTERN.match(directive_line):
-            # stack boşsa bir ifdef falan yoksa else kendi başına duruyor demek
+        elif_match = ELIF_DIRECTIVE_PATTERN.match(directive_line)
+
+        if elif_match is not None:
             if not stack:
                 warnings.append(f"Unmatched #elif at line {line_number}.")
 
             else:
-                stack[-1]["elif_lines"].append(line_number)
+                pending_block = stack[-1]
+                previous_branch = pending_block["branches"][-1]
 
-            line_start += len(original_line)
+                if previous_branch["directive"] == "else":
+                    warnings.append(f"#elif after #else for block opened at line {pending_block['opening_line_number']}.")
+
+                else:
+                    # The previous branch ends where the #elif directive begins.
+                    previous_branch["content_end"] = line_start
+
+                    condition = elif_match.group(1).strip()
+                    referenced_macros = extract_referenced_macros(condition)
+                    matched_target_macros = referenced_macros & target_macros
+
+                    pending_block["branches"].append(
+                        {
+                            "directive": "elif",
+                            "condition": condition,
+                            "referenced_macros": sorted(referenced_macros),
+                            "matched_target_macros": sorted(matched_target_macros),
+                            "is_target": bool(matched_target_macros),
+                            "directive_line": remove_line_ending(original_line).strip(),
+                            "directive_start": line_start,
+                            "directive_end": line_start + len(original_line),
+                            "line_number": line_number,
+                            "content_start": line_start + len(original_line),
+                            "content_end": None,
+                        }
+                    )
+
             continue
 
         if ELSE_DIRECTIVE_PATTERN.match(directive_line):
             if not stack:
                 warnings.append(f"Unmatched #else at line {line_number}.")
 
-            # birden fazla else varsa error
-            elif (stack[-1]["else_start"] is not None):
-                warnings.append(f"Duplicate #else for block opened at line {stack[-1]['opening_line_number']}.")
-
             else:
-                stack[-1]["else_start"] = line_start
-                stack[-1]["else_line_end"] = (line_start + len(original_line))
-                stack[-1]["else_line_number"] = line_number     # #else'in satır numarası
+                pending_block = stack[-1]
+                previous_branch = pending_block["branches"][-1]
 
-            line_start += len(original_line)
+                if previous_branch["directive"] == "else":
+                    warnings.append(
+                        f"Duplicate #else for block opened at line "
+                        f"{pending_block['opening_line_number']}."
+                    )
+
+                else:
+                    # The previous branch ends where the #else directive begins.
+                    previous_branch["content_end"] = line_start
+
+                    pending_block["branches"].append(
+                        {
+                            "directive": "else",
+                            "condition": None,
+                            "referenced_macros": [],
+                            "matched_target_macros": [],
+                            "is_target": False,
+                            "directive_line": remove_line_ending(original_line).strip(),
+                            "directive_start": line_start,
+                            "directive_end": line_start + len(original_line),
+                            "line_number": line_number,
+                            "content_start": line_start + len(original_line),
+                            "content_end": None,
+                        }
+                    )
+
             continue
 
         if ENDIF_DIRECTIVE_PATTERN.match(directive_line):
-            if not stack:   # stack boşsa önceden ifdef falan eklenmemiş demek
+            if not stack:
                 warnings.append(f"Unmatched #endif at line {line_number}.")
-                line_start += len(original_line)
                 continue
 
-            pending_block = stack.pop()     # stackten çıkar
+            pending_block = stack.pop()
 
             endif_start = line_start
             endif_end = (line_start + len(remove_line_ending(original_line)))
 
-            original_branch_end = (
-                pending_block["else_start"]
-                if pending_block["else_start"] is not None
-                else endif_start
-            )
+            # The final branch ends where the #endif directive begins.
+            pending_block["branches"][-1]["content_end"] = endif_start
 
-            # original branch ifdef'den else e kadar, else yoksa endif'e kadar
-            original_branch = content[pending_block["opening_line_end"]:original_branch_end].rstrip("\r\n")
-            alternative_branch = None
+            referenced_macros = set()
+            matched_target_macros = set()
 
-            # else varsa alternative branch onu tutacak.
-            if (pending_block["else_start"] is not None):
-                alternative_branch = content[pending_block["else_line_end"]:endif_start].rstrip("\r\n")
+            for branch in pending_block["branches"]:
+                branch["content"] = content[branch["content_start"]:branch["content_end"]].rstrip("\r\n")
+
+                referenced_macros.update(branch["referenced_macros"])
+                matched_target_macros.update(branch["matched_target_macros"])
 
             block = {
-                "directive": (pending_block["directive"]),
-                "condition": (pending_block["condition"]),
-                "opening_line": (pending_block["opening_line"]),
-                "closing_line": (remove_line_ending(original_line).strip()),
-                "original_branch": (original_branch),
-                "alternative_branch": (alternative_branch),
+                "branches": pending_block["branches"],
+                "referenced_macros": sorted(referenced_macros),
+                "matched_target_macros": sorted(matched_target_macros),
+                "is_target": bool(matched_target_macros),
+                "opening_line": pending_block["opening_line"],
+                "closing_line": remove_line_ending(original_line).strip(),
                 "full_text": content[pending_block["start"]:endif_end],
-                "start": (pending_block["start"]),
+                "start": pending_block["start"],
                 "end": endif_end,
-                "opening_line_number": (pending_block["opening_line_number"]),
-                "else_line_number": (pending_block["else_line_number"]),
-                "closing_line_number": (line_number),
-                "nesting_depth": (pending_block["nesting_depth"]),
-                "contains_nested_conditionals": (pending_block["contains_nested_conditionals"]),
-                "contains_elif": bool(pending_block["elif_lines"]),
-                "has_else": (pending_block["else_start"] is not None),
+                "opening_line_number": pending_block["opening_line_number"],
+                "closing_line_number": line_number,
+                "parent_start": pending_block["parent_start"],
+                "has_target_ancestor": False,
+                "contains_nested_target_conditionals": False,
+                "contains_elif": any(branch["directive"] == "elif" for branch in pending_block["branches"]),
+                "has_else": any(branch["directive"] == "else" for branch in pending_block["branches"]),
             }
 
             block.update(classify_conditional_scope(block, functions))
             blocks.append(block)
-            line_start += len(original_line)
+
             continue
 
-        line_start += len(original_line)
 
     # en son stack boşalmadıysa kapatması unutulmuş bir ifdef var.
     for pending_block in stack:
         warnings.append(f"Conditional block opened at line {pending_block['opening_line_number']} does not have a matching #endif.")
 
     blocks.sort(key=lambda block: block["start"])
-    annotate_header_guard_context(content, blocks,)
+
+    blocks_by_start = {block["start"]: block for block in blocks}
+
+    for block in blocks:
+        if not block["is_target"]:
+            continue
+
+        parent_start = block["parent_start"]
+
+        while parent_start is not None:
+            parent_block = blocks_by_start.get(parent_start)
+
+            if parent_block is None:
+                break
+
+            if parent_block["is_target"]:
+                block["has_target_ancestor"] = True
+                parent_block["contains_nested_target_conditionals"] = True
+
+            parent_start = parent_block["parent_start"]
 
     return blocks, warnings
 
 
-def parse_source(content: str) -> Dict[str, Any]:
-    # Run the two small parsing stages required by this project.
-    functions, function_warnings = (find_function_regions(content))
+def extract_referenced_macros(condition: str) -> Set[str]:
+    # Extract identifier tokens referenced by a preprocessor condition.
+    # Exact identifiers are returned so REHOST_MODE does not match identifiers such as REHOST_MODE_EXTRA.
+    identifiers = set(MACRO_IDENTIFIER_PATTERN.findall(condition))
 
-    conditional_blocks, conditional_warnings = (extract_conditional_blocks(content, functions=functions))
+    identifiers.discard("defined")
+
+    return identifiers
+
+
+def parse_source(content: str, target_macros: Optional[Set[str]] = None,) -> Dict[str, Any]:
+    # Run the two small parsing stages required by this project.
+    functions, function_warnings = find_function_regions(content)
+
+    conditional_blocks, conditional_warnings = extract_conditional_blocks(
+        content,
+        functions=functions,
+        target_macros=target_macros,
+    )
 
     return {
         "functions": functions,
-        "conditional_blocks": (conditional_blocks),
-        "warnings": (function_warnings + conditional_warnings),
+        "conditional_blocks": conditional_blocks,
+        "warnings": function_warnings + conditional_warnings,
     }
 
 
-def parse_file(file_path: Path) -> Dict[str, Any]:
+def parse_file(file_path: Path, target_macros: Optional[Set[str]] = None,) -> Dict[str, Any]:
     # Read and parse one C or C++ source file.
     if not file_path.exists():
         raise FileNotFoundError(f"Source file was not found: {file_path}")
 
-    try:
-        content = file_path.read_text(encoding="utf-8")
-    except UnicodeDecodeError:
-        print(f"{file_path}: utf-8 olarak okunamadı, cp1254 denendi.")
-        content = file_path.read_text(encoding="cp1254")
+    if not file_path.is_file():
+        raise IsADirectoryError(f"Source path is not a file: {file_path}")
+    
+    encodings = ("utf-8", "cp1254")
 
-    return parse_source(content)
+    for encoding in encodings:
+        try:
+            content = file_path.read_text(encoding=encoding)
+            break
+        except UnicodeDecodeError:
+            continue
+    else:
+        raise UnicodeError(
+            f"Source file could not be decoded: {file_path}. "
+            f"Tried encodings: {', '.join(encodings)}")
+
+    return parse_source(content, target_macros=target_macros,)
