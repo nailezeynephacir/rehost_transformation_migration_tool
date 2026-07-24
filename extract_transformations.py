@@ -17,7 +17,7 @@ TRANSFORMATIONS_FILE = (PROJECT_ROOT / "rehost_transformations.json")
 
 EXTRACTION_REPORT_FILE = (PROJECT_ROOT / "extraction_report.txt")
 
-SUPPORTED_SOURCE_EXTENSIONS = {
+PARSED_SOURCE_EXTENSIONS = {
     ".c",
     ".h",
     ".cc",
@@ -26,10 +26,21 @@ SUPPORTED_SOURCE_EXTENSIONS = {
     ".hh",
     ".hpp",
     ".hxx",
-    ".py",
 }
 
-# TO DO: unicode error handle etmen gerekecek
+SUPPORT_FILE_EXTENSIONS = {
+    ".py",
+    ".sh",
+    ".bat",
+    ".cmd",
+    ".ps1",
+}
+
+TRACKED_FILE_EXTENSIONS = (
+    PARSED_SOURCE_EXTENSIONS
+    | SUPPORT_FILE_EXTENSIONS
+)
+
 
 def read_source_file(file_path: Path) -> str:
     # Read one source file.
@@ -72,29 +83,27 @@ def read_support_file_content(file_path: Path) -> str:
     raise UnicodeError(f"Support file could not be decoded: {file_path}. Tried encodings: {', '.join(encodings)}")
 
 
-def find_source_files(source_directory: Path) -> Dict[str, Path]:
-    # Find supported C and C++ files recursively.
-    # Files are indexed by their relative POSIX-style paths so matching files in original and rehost can be paired reliably.
+def find_project_files(source_directory: Path, allowed_extensions: set[str],) -> Dict[str, Path]:
+    # Find files with the requested extensions recursively.
     if not source_directory.exists():
-        raise FileNotFoundError("Source directory was not found: "f"{source_directory}")
+        raise FileNotFoundError(f"Source directory was not found: {source_directory}")
 
     if not source_directory.is_dir():
-        raise NotADirectoryError("Source path is not a directory: "f"{source_directory}")
+        raise NotADirectoryError(f"Source path is not a directory: {source_directory}")
 
-    source_files = {}
+    project_files = {}
 
     for file_path in source_directory.rglob("*"):
         if not file_path.is_file():
             continue
 
-        if (file_path.suffix.lower()not in SUPPORTED_SOURCE_EXTENSIONS):
+        if file_path.suffix.lower() not in allowed_extensions:
             continue
 
         relative_file_path = (file_path.relative_to(source_directory).as_posix())
+        project_files[relative_file_path] = file_path
 
-        source_files[relative_file_path] = file_path
-
-    return source_files
+    return project_files
 
 
 def get_original_search_regions(
@@ -178,15 +187,19 @@ def select_matching_original_branch(block: Dict[str, Any], search_regions: List[
             }
         )
 
-    unique_matches = [ result for result in branch_results if result["occurrence_count"] == 1]
     found_matches = [result for result in branch_results if result["occurrence_count"] > 0]
 
-    # Safe replacement case:
-    # Exactly one branch must exist in the old original source, and that branch must occur exactly once in the expected scope.
-    # Multiple matching branches make the branch identity ambiguous.
-    # Multiple occurrences of one branch make the replacement location ambiguous.
-    if len(unique_matches) == 1 and len(found_matches) == 1:
-        selected_match = unique_matches[0]
+    if len(found_matches) == 1:
+        selected_match = found_matches[0]
+
+        if (selected_match["occurrence_count"] > 1 and block["scope"] != "function"):
+            return (
+                None,
+                "The matching branch was found more than once outside function scope, so the match is ambiguous.",
+                branch_results,
+            )
+        
+
         selected_block = dict(block)
 
         selected_block["matched_branch_content"] = selected_match["text"]
@@ -236,13 +249,6 @@ def select_matching_original_branch(block: Dict[str, Any], search_regions: List[
             branch_results,
         )
 
-    return (
-        None,
-        "The matching conditional branch was found more than once, "
-        "so the match is ambiguous. "
-        f"Results: {result_details_text}.",
-        branch_results,
-    )
 
 # ----- ORIGINALDE OLMAYIP SADECE REHOSTTA OLAN KODLARI EKLEMEK İÇİN -----
 def determine_function_insertion_position(block: Dict[str, Any], rehost_source: str, rehost_functions: List[Dict[str, Any]]) -> Optional[str]:
@@ -268,6 +274,19 @@ def determine_function_insertion_position(block: Dict[str, Any], rehost_source: 
         return "function_end"
 
     return None
+
+def contains_unstable_preprocessor_directive(text: str) -> bool:
+    # Permit #include anchors, but reject conditional and macro directives.
+    for line in text.splitlines():
+        normalized_line = normalize_code_text(line)
+
+        if not normalized_line:
+            continue
+
+        if (normalized_line.startswith("#") and not normalized_line.startswith("#include")):
+            return True
+
+    return False
 
 
 def find_unique_following_anchor(block: Dict[str, Any], rehost_source: str, rehost_functions: List[Dict[str, Any]], original_search_regions: List[Dict[str, Any]]) -> Optional[str]:
@@ -357,20 +376,6 @@ def find_unique_preceding_anchor(block: Dict[str, Any], rehost_source: str, reho
     return None
 
 
-def contains_preprocessor_directive(text: str) -> bool:
-    # Check whether the candidate anchor contains a preprocessor directive.
-    for line in text.splitlines():
-        normalized_line = normalize_code_text(line)
-
-        if not normalized_line:
-            continue
-
-        if normalized_line.startswith("#"):
-            return True
-
-    return False
-
-
 def find_containing_non_function_region(block: Dict[str, Any], rehost_non_function_regions: List[Dict[str, Any]],
 ) -> Optional[Dict[str, Any]]:
     # Find the non-function source region that completely
@@ -405,9 +410,9 @@ def find_unique_following_non_function_anchor(block: Dict[str, Any], rehost_sour
 
         meaningful_line_count += 1
         candidate_text = "".join(candidate_lines).strip()
-
-        # header'ın adı falan değişebileceği için bunu anchor olarak kullanmayacağız.
-        if (block.get("inside_header_guard", False) and contains_preprocessor_directive(candidate_text)):
+        
+        # #define SENSOR_H, #endif, #ifdef gibi kırılgan anchor’lar kullanılmaz ama #include "x.h" kullanılabilir.
+        if contains_unstable_preprocessor_directive(candidate_text):
             return None
         
         occurrence_count = count_normalized_occurrences(original_search_regions, candidate_text)
@@ -448,8 +453,8 @@ def find_unique_preceding_non_function_anchor(block: Dict[str, Any],rehost_sourc
         meaningful_line_count += 1
         candidate_text = "".join(candidate_lines).strip()
 
-        # header'ın adı falan değişebileceği için bunu anchor olarak kullanmayacağız.
-        if (block.get("inside_header_guard", False) and contains_preprocessor_directive(candidate_text)):
+        # #define SENSOR_H, #endif, #ifdef gibi kırılgan anchor’lar kullanılmaz ama #include "x.h" kullanılabilir.
+        if contains_unstable_preprocessor_directive(candidate_text):
             return None
         
         occurrence_count = count_normalized_occurrences(original_search_regions, candidate_text)
@@ -484,7 +489,7 @@ def build_transformation(transformation_number: int, relative_file_path: str, bl
         "file": relative_file_path,
         "scope": block["scope"],
         "match": matched_branch_content.strip(),
-        "replacement": full_text.strip(),
+        "replacement": full_text.rstrip("\r\n"),
     }
 
     # Function information is required only for function-scope transformations.
@@ -505,7 +510,7 @@ def build_insertion_transformation(transformation_number: int, relative_file_pat
         "scope": "function",
         "operation": "insert",
         "position": position,
-        "content": block["full_text"].strip(),
+        "content": block["full_text"].rstrip("\r\n"),
         "function": {
             "name": block["function_name"],
             "signature": block["function_signature"],
@@ -522,7 +527,7 @@ def build_anchor_insertion_transformation(transformation_number: int, relative_f
         "operation": "insert",
         "position": position,
         "anchor": anchor,
-        "content": block["full_text"].strip(),
+        "content": block["full_text"].rstrip("\r\n"),
     }
 
     # Store the opposite-side anchor as a fallback when available.
@@ -639,22 +644,13 @@ def extract_transformations(original_source: str, rehost_source: str, original_p
 
             continue
 
-        (
-            selected_block,
-            branch_selection_error,
-            branch_results,
-        ) = select_matching_original_branch(
-            block,
-            search_regions,
-        )
+        (selected_block, branch_selection_error,branch_results,
+        ) = select_matching_original_branch(block, search_regions,)
 
         if selected_block is None:
-            branches_are_absent = all(
-                result["occurrence_count"] == 0
-                for result in branch_results
-            )
+            branches_are_absent = all(result["occurrence_count"] == 0 for result in branch_results)
 
-            # Insertion is allowed only when neither conditional branch exists in the old original source.
+            # Insertion is allowed only when none of the conditional branches exists in the old original source.
             if branches_are_absent:
                 insertion_position = None
                 insertion_anchor = None
@@ -758,7 +754,7 @@ def extract_transformations(original_source: str, rehost_source: str, original_p
                             relative_file_path,
                             block,
                             result="CREATED",
-                            reason=("Neither conditional branch exists in the old original source. The complete block "
+                            reason=("None of the conditional branch exists in the old original source. The complete block "
                                 f"was stored as a {insertion_position} insertion."),
                             transformation_id=transformation["id"]
                         )
@@ -772,8 +768,9 @@ def extract_transformations(original_source: str, rehost_source: str, original_p
                     block,
                     result="SKIPPED",
                     reason=(
-                        branch_selection_error
-                        or "No unique and reliable insertion point was found."
+                        "None of the conditional branch exists in the old original source, but no unique and reliable insertion point could be identified."
+                        if branches_are_absent
+                        else (branch_selection_error or "The original branch could not be identified.")
                     )
                 )
             )
@@ -814,7 +811,7 @@ def build_support_files(rehost_only_paths: List[str], rehost_files: Dict[str, Pa
         try:
             content = read_support_file_content(support_file_path)
 
-        except (OSError, UnicodeDecodeError) as error:
+        except (OSError, UnicodeError) as error:
             reason = f"The rehost-only file could not be stored as UTF-8 or cp1254 content: {error}"
             report_entries.append(
                 {
@@ -883,7 +880,7 @@ def save_extraction_report(report_entries: List[Dict[str, Any]], support_file_en
         "",
         "SUMMARY",
         "-------",
-        f"Detected conditional blocks: {detected_block_count}",
+        f"Target conditional blocks detected: {detected_block_count}",
         f"Created transformations: {created_count}",
         f"Skipped blocks: {skipped_count}",
         (f"Support files stored in JSON: {stored_support_file_count}"),
@@ -912,13 +909,30 @@ def save_extraction_report(report_entries: List[Dict[str, Any]], support_file_en
                 f"Function: {entry['function_name']}"
             )
 
+        matched_directive = entry.get("matched_branch_directive")
+
+        if matched_directive is not None:
+            matched_condition = entry.get("matched_branch_condition")
+
+            if matched_condition is None:
+                branch_description = f"#{matched_directive}"
+            else:
+                branch_description = (
+                    f"#{matched_directive} "
+                    f"{matched_condition}"
+                )
+
+            report_lines.append(f"Matched branch: {branch_description}")
+            report_lines.append(f"Matched branch line: {entry['matched_branch_line']}"
+            )
+
         report_lines.extend(
             [
                 f"Rehost opening line: {entry['opening_line']}",
                 f"Reason: {entry['reason']}",
                 "Matched original branch:",
                 indent_text(entry["match_text"]),
-                ""
+                "",
             ]
         )
     report_lines.extend(
@@ -948,7 +962,7 @@ def save_extraction_report(report_entries: List[Dict[str, Any]], support_file_en
 
     report_lines.extend(
         [
-            "PARSER WARNINGS",
+            "WARNINGS",
             "---------------"
         ]
     )
@@ -988,19 +1002,22 @@ def main() -> None:
 
     target_macros = set(arguments.target_macros)
 
-    original_files = find_source_files(ORIGINAL_DIR)
+    original_source_files = find_project_files(ORIGINAL_DIR, PARSED_SOURCE_EXTENSIONS,)
+    rehost_source_files = find_project_files(REHOST_DIR, PARSED_SOURCE_EXTENSIONS,)
 
-    rehost_files = find_source_files(REHOST_DIR)
+    original_tracked_files = find_project_files(ORIGINAL_DIR, TRACKED_FILE_EXTENSIONS,)
+    rehost_tracked_files = find_project_files(REHOST_DIR, TRACKED_FILE_EXTENSIONS,)
 
-    original_relative_paths = set(original_files)
+    original_source_paths = set(original_source_files)
+    rehost_source_paths = set(rehost_source_files)
 
-    rehost_relative_paths = set(rehost_files)
+    common_relative_paths = sorted(original_source_paths & rehost_source_paths)
+    original_only_paths = sorted(original_source_paths - rehost_source_paths)
 
-    common_relative_paths = sorted(original_relative_paths& rehost_relative_paths)
+    original_tracked_paths = set(original_tracked_files)
+    rehost_tracked_paths = set(rehost_tracked_files)
 
-    original_only_paths = sorted(original_relative_paths- rehost_relative_paths)
-
-    rehost_only_paths = sorted(rehost_relative_paths- original_relative_paths)
+    rehost_only_paths = sorted(rehost_tracked_paths - original_tracked_paths)
 
     all_transformations = []
     all_report_entries = []
@@ -1012,9 +1029,9 @@ def main() -> None:
     next_transformation_number = 1
 
     # Files must exist at the same relative path in both directories.
-    for file_index, relative_file_path in enumerate(common_relative_paths, start=1):
-        original_file = original_files[relative_file_path]
-        rehost_file = rehost_files[relative_file_path]
+    for relative_file_path in common_relative_paths:
+        original_file = original_source_files[relative_file_path]
+        rehost_file = rehost_source_files[relative_file_path]
 
         try:
             original_source = read_source_file(original_file)
@@ -1039,8 +1056,9 @@ def main() -> None:
 
             next_transformation_number += len(file_transformations)
 
-            detected_block_count += len(
-                rehost_parse_result["conditional_blocks"]
+            detected_block_count += sum(
+                block["is_target"]
+                for block in rehost_parse_result["conditional_blocks"]
             )
 
             all_warnings.extend(
@@ -1053,7 +1071,7 @@ def main() -> None:
                 for warning in rehost_parse_result["warnings"]
             )
 
-        except (OSError, UnicodeDecodeError, ValueError) as error:
+        except (OSError, UnicodeError, ValueError) as error:
             print(
                 f"  ERROR while processing {relative_file_path}: {error}",
                 flush=True
@@ -1068,7 +1086,7 @@ def main() -> None:
         all_warnings.append(f"{relative_file_path}: The file exists only in original and was skipped.")
 
     # Rehost-only files are complete support files rather than conditional transformations. Store their content in the JSON.
-    (all_support_files, all_support_file_entries, support_file_warnings) = build_support_files(rehost_only_paths, rehost_files)
+    (all_support_files, all_support_file_entries, support_file_warnings) = build_support_files(rehost_only_paths, rehost_tracked_files)
 
     all_warnings.extend(support_file_warnings)
 
