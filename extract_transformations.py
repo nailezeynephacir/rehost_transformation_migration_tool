@@ -181,7 +181,6 @@ def select_matching_original_branch(block: Dict[str, Any], search_regions: List[
             {
                 "directive": branch.get("directive"),
                 "condition": branch.get("condition"),
-                "line_number": branch.get("line_number"),
                 "text": branch_text,
                 "occurrence_count": occurrence_count,
             }
@@ -234,8 +233,7 @@ def select_matching_original_branch(block: Dict[str, Any], search_regions: List[
     if not found_matches:
         return (
             None,
-            "None of the conditional branches was found as one continuous "
-            "block in the expected scope. "
+            "None of the conditional branches was found as one continuous block in the expected scope. "
             f"Results: {result_details_text}.",
             branch_results,
         )
@@ -243,8 +241,7 @@ def select_matching_original_branch(block: Dict[str, Any], search_regions: List[
     if len(found_matches) > 1:
         return (
             None,
-            "More than one conditional branch was found in the old original "
-            "source, so the original branch is ambiguous. "
+            "More than one conditional branch was found in the old original source, so the original branch is ambiguous. "
             f"Results: {result_details_text}.",
             branch_results,
         )
@@ -548,7 +545,7 @@ def build_anchor_insertion_transformation(transformation_number: int, relative_f
     return transformation
 # ------------------------------------------------------------------------
 
-def build_report_entry(relative_file_path: str, block: Dict[str, Any], result: str, reason: str,transformation_id: Optional[str] = None,) -> Dict[str, Any]:
+def build_report_entry(relative_file_path: str, block: Dict[str, Any], result: str, reason: str,transformation_id: Optional[str] = None,transformation: Optional[Dict[str, Any]] = None,) -> Dict[str, Any]:
     # Keep extraction details outside the transformation JSON.
     match_text = block.get("matched_branch_content", "")
 
@@ -559,12 +556,23 @@ def build_report_entry(relative_file_path: str, block: Dict[str, Any], result: s
 
     branch_directive = None
     branch_condition = None
-    branch_line_number = None
 
     if isinstance(matched_branch, dict):
         branch_directive = matched_branch.get("directive")
         branch_condition = matched_branch.get("condition")
-        branch_line_number = matched_branch.get("line_number")
+
+    operation = "replace"
+    position = None
+    anchor = None
+    fallback_position = None
+    fallback_anchor = None
+
+    if isinstance(transformation, dict):
+        operation = transformation.get("operation", "replace")
+        position = transformation.get("position")
+        anchor = transformation.get("anchor")
+        fallback_position = transformation.get("fallback_position")
+        fallback_anchor = transformation.get("fallback_anchor")
 
     return {
         "result": result,
@@ -572,10 +580,13 @@ def build_report_entry(relative_file_path: str, block: Dict[str, Any], result: s
         "file": relative_file_path,
         "scope": block["scope"],
         "function_name": block["function_name"],
-        "opening_line": block["opening_line_number"],
+        "operation": operation,
+        "position": position,
+        "anchor": anchor,
+        "fallback_position": fallback_position,
+        "fallback_anchor": fallback_anchor,
         "matched_branch_directive": branch_directive,
         "matched_branch_condition": branch_condition,
-        "matched_branch_line": branch_line_number,
         "match_text": match_text.strip(),
         "reason": reason,
     }
@@ -754,9 +765,9 @@ def extract_transformations(original_source: str, rehost_source: str, original_p
                             relative_file_path,
                             block,
                             result="CREATED",
-                            reason=("None of the conditional branch exists in the old original source. The complete block "
-                                f"was stored as a {insertion_position} insertion."),
-                            transformation_id=transformation["id"]
+                            reason=("None of the conditional branch exists in the old original source. The complete block was stored as an insertion."),
+                            transformation_id=transformation["id"],
+                            transformation=transformation,
                         )
                     )
 
@@ -791,7 +802,8 @@ def extract_transformations(original_source: str, rehost_source: str, original_p
                 selected_block,
                 result="CREATED",
                 reason=("Conditional branch was found in the expected scope."),
-                transformation_id=(transformation["id"])
+                transformation_id=(transformation["id"]),
+                transformation=transformation,
             )
         )
 
@@ -866,13 +878,25 @@ def indent_text(text: str, indentation: str = "    ") -> str:
 
 
 def save_extraction_report(report_entries: List[Dict[str, Any]], support_file_entries: List[Dict[str, str]], parser_warnings: List[str],
-    detected_block_count: int, output_file: Path) -> None:
+detected_block_count: int, output_file: Path,) -> None:
     # Create a detailed human-readable extraction report.
-    created_count = sum(entry["result"] == "CREATED" for entry in report_entries)
-    skipped_count = sum(entry["result"] == "SKIPPED" for entry in report_entries)
+    created_count = sum(
+        entry["result"] == "CREATED"
+        for entry in report_entries
+    )
+    skipped_count = sum(
+        entry["result"] == "SKIPPED"
+        for entry in report_entries
+    )
 
-    stored_support_file_count = sum(entry["result"] == "CREATED" for entry in support_file_entries)
-    skipped_support_file_count = sum(entry["result"] == "SKIPPED" for entry in support_file_entries)
+    stored_support_file_count = sum(
+        entry["result"] == "CREATED"
+        for entry in support_file_entries
+    )
+    skipped_support_file_count = sum(
+        entry["result"] == "SKIPPED"
+        for entry in support_file_entries
+    )
 
     report_lines = [
         "REHOST TRANSFORMATION EXTRACTION REPORT",
@@ -883,64 +907,96 @@ def save_extraction_report(report_entries: List[Dict[str, Any]], support_file_en
         f"Target conditional blocks detected: {detected_block_count}",
         f"Created transformations: {created_count}",
         f"Skipped blocks: {skipped_count}",
-        (f"Support files stored in JSON: {stored_support_file_count}"),
-        (f"Support files skipped: {skipped_support_file_count}"),
+        f"Support files stored in JSON: {stored_support_file_count}",
+        f"Support files skipped: {skipped_support_file_count}",
         f"Warnings: {len(parser_warnings)}",
-        ""
+        "",
+        "TRANSFORMATIONS",
+        "---------------",
     ]
 
-    for entry in report_entries:
-        report_lines.extend(
-            [
-                f"[{entry['result']}]",
-                f"File: {entry['file']}",
-                f"Scope: {entry['scope']}"
-            ]
-        )
-
-        if entry["transformation_id"] is not None:
-            report_lines.append(
-                "Transformation: "
-                f"{entry['transformation_id']}"
+    if report_entries:
+        for entry in report_entries:
+            report_lines.extend(
+                [
+                    f"[{entry['result']}]",
+                    f"File: {entry['file']}",
+                    f"Scope: {entry['scope']}",
+                ]
             )
 
-        if entry["function_name"] is not None:
-            report_lines.append(
-                f"Function: {entry['function_name']}"
-            )
-
-        matched_directive = entry.get("matched_branch_directive")
-
-        if matched_directive is not None:
-            matched_condition = entry.get("matched_branch_condition")
-
-            if matched_condition is None:
-                branch_description = f"#{matched_directive}"
-            else:
-                branch_description = (
-                    f"#{matched_directive} "
-                    f"{matched_condition}"
+            if entry["transformation_id"] is not None:
+                report_lines.append(
+                    f"Transformation: {entry['transformation_id']}"
                 )
 
-            report_lines.append(f"Matched branch: {branch_description}")
-            report_lines.append(f"Matched branch line: {entry['matched_branch_line']}"
+            if entry["function_name"] is not None:
+                report_lines.append(
+                    f"Function: {entry['function_name']}"
+                )
+
+            matched_directive = entry.get(
+                "matched_branch_directive"
             )
 
+            if matched_directive is not None:
+                matched_condition = entry.get(
+                    "matched_branch_condition"
+                )
+
+                if matched_condition is None:
+                    branch_description = f"#{matched_directive}"
+                else:
+                    branch_description = (
+                        f"#{matched_directive} "
+                        f"{matched_condition}"
+                    )
+
+                report_lines.append(f"Matched branch: {branch_description}")
+
+            report_lines.append(f"Operation: {entry['operation']}")
+
+            if entry["operation"] == "insert":
+                report_lines.append(f"Position: {entry['position']}")
+
+                if entry["anchor"] is not None:
+                    report_lines.extend(["Anchor:", indent_text(entry["anchor"]),])
+
+                if entry["fallback_anchor"] is not None:
+                    report_lines.extend(
+                        [
+                            (
+                                "Fallback position: "
+                                f"{entry['fallback_position']}"
+                            ),
+                            "Fallback anchor:",
+                            indent_text(
+                                entry["fallback_anchor"]
+                            ),
+                        ]
+                    )
+
+            report_lines.append(f"Reason: {entry['reason']}")
+
+            if entry["operation"] == "replace":
+                report_lines.extend(["Matched original branch:", indent_text(entry["match_text"]),])
+
+            report_lines.append("")
+    else:
         report_lines.extend(
             [
-                f"Rehost opening line: {entry['opening_line']}",
-                f"Reason: {entry['reason']}",
-                "Matched original branch:",
-                indent_text(entry["match_text"]),
+                "None",
                 "",
             ]
         )
+
     report_lines.extend(
         [
             "SUPPORT FILES",
-            "-------------"
+            "-------------",
         ]
     )
+
     if support_file_entries:
         for entry in support_file_entries:
             report_lines.extend(
@@ -948,22 +1004,21 @@ def save_extraction_report(report_entries: List[Dict[str, Any]], support_file_en
                     f"[{entry['result']}]",
                     f"File: {entry['file']}",
                     f"Reason: {entry['reason']}",
-                    ""
+                    "",
                 ]
             )
     else:
         report_lines.extend(
             [
                 "None",
-                ""
+                "",
             ]
         )
-
 
     report_lines.extend(
         [
             "WARNINGS",
-            "---------------"
+            "--------",
         ]
     )
 
@@ -975,8 +1030,7 @@ def save_extraction_report(report_entries: List[Dict[str, Any]], support_file_en
 
     report_lines.append("")
 
-    output_file.write_text("\n".join(report_lines), encoding="utf-8")
-
+    output_file.write_text("\n".join(report_lines), encoding="utf-8",)
 
 def parse_arguments() -> argparse.Namespace:
     # Read optional command-line settings.
