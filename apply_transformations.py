@@ -92,12 +92,12 @@ def build_transformation_search_regions(source_text: str, transformation: Dict[s
     )
 
 
-def insert_text_at_position(source_text: str, insertion_index: int, content: str) -> str:
+def insert_text_at_position(source_text: str, insertion_index: int, content: str) -> Tuple[str, int, int]:
     # Insert a block while keeping it separated from surrounding code.
     prefix = source_text[:insertion_index]
     suffix = source_text[insertion_index:]
 
-    text_to_insert = content.strip()
+    text_to_insert = content.strip("\r\n")
 
     if prefix and not prefix.endswith("\n"):
         text_to_insert = "\n" + text_to_insert
@@ -105,7 +105,9 @@ def insert_text_at_position(source_text: str, insertion_index: int, content: str
     if suffix and not suffix.startswith("\n"):
         text_to_insert = text_to_insert + "\n"
 
-    return (prefix + text_to_insert + suffix)
+    updated_source = prefix + text_to_insert + suffix
+
+    return (updated_source, insertion_index, insertion_index + len(text_to_insert),)
 
 
 def apply_insertion_transformation(source_text: str, transformation: Dict[str, Any]) -> Tuple[str, Dict[str, Any]]:
@@ -129,8 +131,8 @@ def apply_insertion_transformation(source_text: str, transformation: Dict[str, A
         "match_count": 0,
         "fallback_match_count": 0,
         "parser_warnings": parser_warnings,
-        "start": None,
-        "end": None,
+        "applied_count": 0,
+        "ranges": [],
     }
 
     # Parser warnings mean that function and non-function boundaries may be unreliable.
@@ -155,10 +157,15 @@ def apply_insertion_transformation(source_text: str, transformation: Dict[str, A
         result.update(
             {
                 "result": "ALREADY_APPLIED",
-                "reason": ("The complete insertion content is already present in the required scope."),
-                "match_count": 1,
-                "start": existing_match["start"],
-                "end": existing_match["end"],
+                "reason": "The complete insertion content is already present in the required scope.",
+                "match_count": 0,
+                "applied_count": 0,
+                "ranges": [
+                    {
+                        "start": existing_match["start"],
+                        "end": existing_match["end"],
+                    }
+                ],
             }
         )
 
@@ -191,18 +198,19 @@ def apply_insertion_transformation(source_text: str, transformation: Dict[str, A
         else:
             insertion_index = function_region["end"]
 
-        updated_source = insert_text_at_position(
+        updated_source, inserted_start, inserted_end = insert_text_at_position(
             source_text=source_text,
             insertion_index=insertion_index,
-            content=content
+            content=content,
         )
 
         result.update(
             {
                 "result": "APPLIED",
                 "reason": (f"The insertion was applied at the {position} position."),
-                "start": insertion_index,
-                "end": insertion_index + len(content.strip()),
+                "applied_count": 1,
+                "start": inserted_start,
+                "end": inserted_end,
             }
         )
         return updated_source, result
@@ -265,10 +273,10 @@ def apply_insertion_transformation(source_text: str, transformation: Dict[str, A
     else:
         insertion_index = anchor_match["end"]
 
-    updated_source = insert_text_at_position(
+    updated_source, inserted_start, inserted_end = insert_text_at_position(
         source_text=source_text,
         insertion_index=insertion_index,
-        content=content
+        content=content,
     )
 
     result.update(
@@ -282,8 +290,13 @@ def apply_insertion_transformation(source_text: str, transformation: Dict[str, A
             "used_anchor": used_anchor,
             "used_position": used_position,
             "used_fallback": used_fallback,
-            "start": insertion_index,
-            "end": insertion_index + len(content.strip()),
+            "applied_count": 1,
+            "ranges": [
+                {
+                    "start": inserted_start,
+                    "end": inserted_end,
+                }
+            ],
         }
     )
     return updated_source, result
@@ -302,6 +315,7 @@ def get_transformation_function_name(transformation: Dict[str, Any]) -> Optional
         return None
 
     return function_name
+
 
 ## ----- This were added for occurence > 1, still do it case -----
 
@@ -354,8 +368,8 @@ def apply_single_transformation(source_text: str,transformation: Dict[str, Any])
             "reason": (f"Unsupported transformation operation: {operation}"),
             "match_count": 0,
             "parser_warnings": [],
-            "start": None,
-            "end": None,
+            "applied_count": 0,
+            "ranges": [],
         }
 
     transformation_id = transformation.get("id","unknown")
@@ -368,13 +382,13 @@ def apply_single_transformation(source_text: str,transformation: Dict[str, Any])
         "scope": transformation.get("scope"),
         "function_name": (get_transformation_function_name(transformation)),
         "expected_match": transformation.get("match", ""),
+        "result": "SKIPPED",
+        "reason": "",
         "match_count": 0,
         "replacement_match_count": 0,
         "applied_count": 0,
         "parser_warnings": parser_warnings,
         "ranges": [],
-        "start": None,
-        "end": None,
     }
 
     # Parser warnings mean that source boundaries may be unreliable.
@@ -417,13 +431,15 @@ def apply_single_transformation(source_text: str,transformation: Dict[str, Any])
                     "reason": ("No untransformed matches remain in the required scope. "
                          f"The complete replacement is already present {len(replacement_matches)} time(s)."
                     ),
-                    "ranges": [
-                        {
-                            "start": match["start"],
-                            "end": match["end"],
-                        }
-                        for match in replacement_matches
-                    ],
+                    "match_count": 1,
+                    "applied_count": 0,
+                        "ranges": [
+                            {
+                                "start": match["start"],
+                                "end": match["end"],
+                            }
+                            for match in replacement_matches
+                        ],
                 }
             )
 
@@ -463,8 +479,6 @@ def apply_single_transformation(source_text: str,transformation: Dict[str, Any])
             ),
             "applied_count": len(matches_to_apply),
             "ranges": applied_ranges,
-            "start": matches_to_apply[0]["start"],
-            "end": matches_to_apply[-1]["end"],
         }
     )
 
@@ -649,7 +663,7 @@ def apply_support_files_to_project(output_directory: Path, support_files: List[D
                 {
                     "result": "SKIPPED",
                     "file": relative_file_path,
-                    "reason": (f"The support file could not be created: {error}"),
+                    "reason": f"The support file could not be created: {error}",
                 }
             )
             continue
@@ -658,7 +672,7 @@ def apply_support_files_to_project(output_directory: Path, support_files: List[D
             {
                 "result": "CREATED",
                 "file": relative_file_path,
-                "reason": ("The support file was created from the content stored in the transformation JSON."),
+                "reason": "The support file was created from the content stored in the transformation JSON.",
             }
         )
 
@@ -697,8 +711,6 @@ def build_file_skip_result(transformation: Dict[str, Any],reason: str) -> Dict[s
         "applied_count": 0,
         "parser_warnings": [],
         "ranges": [],
-        "start": None,
-        "end": None,
     }
 
 
@@ -717,14 +729,14 @@ def apply_transformations_to_project(output_directory: Path,transformations: Lis
             continue
 
         if not output_file.exists():
-            reason = (f"The file was not found in new_original: {relative_file_path}")
+            reason = f"The file was not found in new_original: {relative_file_path}"
 
             for transformation in file_transformations:
                 application_results.append(build_file_skip_result(transformation, reason))
             continue
 
         if not output_file.is_file():
-            reason = ("The transformation path does not point to a regular file.")
+            reason = "The transformation path does not point to a regular file."
 
             for transformation in file_transformations:
                 application_results.append(build_file_skip_result(transformation, reason))
@@ -756,10 +768,15 @@ def indent_text(text: str, indentation: str = "    ") -> str:
     return "\n".join(indentation + line for line in lines)
 
 
-def save_application_report(application_results: List[Dict[str, Any]], transformation_count: int, transformed_file_count: int, output_file: Path) -> None:
+def save_application_report(application_results: List[Dict[str, Any]], support_file_results: List[Dict[str, str]], transformation_count: int, transformed_file_count: int, output_file: Path) -> None:
     # Write a detailed report for applied and skipped transformations.
     applied_count = sum(result["result"] == "APPLIED" for result in application_results)
+    already_applied_count = sum(result["result"] == "ALREADY_APPLIED" for result in application_results)
     skipped_count = sum(result["result"] == "SKIPPED" for result in application_results)
+
+    created_support_file_count = sum(result["result"] == "CREATED" for result in support_file_results)
+    skipped_support_file_count = sum(result["result"] == "SKIPPED" for result in support_file_results)
+
     warning_count = sum(len(result.get("parser_warnings", [])) for result in application_results)
 
     report_lines = [
@@ -771,7 +788,11 @@ def save_application_report(application_results: List[Dict[str, Any]], transform
         (f"Files containing transformations: {transformed_file_count}"),
         (f"Transformations loaded: {transformation_count}"),
         (f"Transformations applied: {applied_count}"),
+        (f"Transformations already applied: {already_applied_count}"),
         (f"Transformations skipped: {skipped_count}"),
+        (f"Support files loaded: {len(support_file_results)}"),
+        (f"Support files created: {created_support_file_count}"),
+        (f"Support files skipped: {skipped_support_file_count}"),
         (f"Parser warnings: {warning_count}"),
         ""
     ]
@@ -783,6 +804,37 @@ def save_application_report(application_results: List[Dict[str, Any]], transform
                 ""
             ]
         )
+
+
+    report_lines.extend(
+        [
+            "SUPPORT FILE RESULTS",
+            "--------------------",
+            "",
+        ]
+    )
+
+    if not support_file_results:
+        report_lines.extend(["No support files were available.","",])
+
+    for support_result in support_file_results:
+        report_lines.extend(
+            [
+                f"[{support_result['result']}]",
+                f"File: {support_result['file']}",
+                f"Reason: {support_result['reason']}",
+                "",
+            ]
+        )
+
+    report_lines.extend(
+        [
+            "TRANSFORMATION RESULTS",
+            "----------------------",
+            "",
+        ]
+    )
+
 
     for result in application_results:
         report_lines.extend(
@@ -798,6 +850,10 @@ def save_application_report(application_results: List[Dict[str, Any]], transform
 
         if function_name is not None:
             report_lines.append(f"Function: {function_name}")
+
+        reason = result.get("reason")
+        if reason:
+            report_lines.append(f"Reason: {reason}")
 
         if result["result"] == "APPLIED":
             report_lines.append(f"Applied occurrence count: {result.get('applied_count', 0)}")
@@ -852,7 +908,6 @@ def main() -> None:
     prepare_generated_project(source_directory=NEW_ORIGINAL_DIR, output_directory=GENERATED_REHOST_DIR)
 
     support_file_results = apply_support_files_to_project(output_directory=GENERATED_REHOST_DIR, support_files=support_files)
-    # not written in report - UPDATE
     
     application_results = (apply_transformations_to_project(output_directory=(GENERATED_REHOST_DIR), transformations=transformations))
 
@@ -860,6 +915,7 @@ def main() -> None:
 
     save_application_report(
         application_results=application_results,
+        support_file_results=support_file_results,
         transformation_count=len(transformations),
         transformed_file_count=len(grouped_transformations),
         output_file=APPLICATION_REPORT_FILE
