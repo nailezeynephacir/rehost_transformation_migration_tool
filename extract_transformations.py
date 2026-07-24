@@ -206,7 +206,6 @@ def select_matching_original_branch(block: Dict[str, Any], search_regions: List[
         selected_block["matched_branch"] = {
             "directive": selected_match["directive"],
             "condition": selected_match["condition"],
-            "line_number": selected_match["line_number"],
         }
 
         return selected_block, None, branch_results
@@ -216,7 +215,6 @@ def select_matching_original_branch(block: Dict[str, Any], search_regions: List[
     for result in branch_results:
         directive = result["directive"]
         condition = result["condition"]
-        line_number = result["line_number"]
 
         if condition is None:
             branch_description = f"#{directive}"
@@ -224,7 +222,6 @@ def select_matching_original_branch(block: Dict[str, Any], search_regions: List[
             branch_description = f"#{directive} {condition}"
 
         result_details.append(
-            f"{branch_description} at line {line_number}: "
             f"{result['occurrence_count']} match(es)"
         )
 
