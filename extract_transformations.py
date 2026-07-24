@@ -1,68 +1,133 @@
 from pathlib import Path
 import json
-import shutil
+import argparse
 from typing import Any, Dict, List, Optional, Tuple
 
 from parser import parse_source
-from transformation_matching import build_non_function_regions, find_matches_in_regions, find_matching_function
+from transformation_matching import build_non_function_regions, count_normalized_occurrences, find_matching_function, normalize_code_text
+
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 
+ORIGINAL_DIR = (PROJECT_ROOT / "original")
+
+REHOST_DIR = (PROJECT_ROOT / "rehost")
+
 TRANSFORMATIONS_FILE = (PROJECT_ROOT / "rehost_transformations.json")
 
-NEW_ORIGINAL_DIR = (PROJECT_ROOT / "new_original")
+EXTRACTION_REPORT_FILE = (PROJECT_ROOT / "extraction_report.txt")
 
-GENERATED_REHOST_DIR = (PROJECT_ROOT / "generated_rehost")
+PARSED_SOURCE_EXTENSIONS = {
+    ".c",
+    ".h",
+    ".cc",
+    ".cpp",
+    ".cxx",
+    ".hh",
+    ".hpp",
+    ".hxx",
+}
 
-APPLICATION_REPORT_FILE = (PROJECT_ROOT / "application_report.txt")
+SUPPORT_FILE_EXTENSIONS = {
+    ".py",
+    ".sh",
+    ".bat",
+    ".cmd",
+    ".ps1",
+}
+
+TRACKED_FILE_EXTENSIONS = (PARSED_SOURCE_EXTENSIONS | SUPPORT_FILE_EXTENSIONS)
 
 
-def prepare_generated_project(source_directory: Path, output_directory: Path) -> None:
-    # Create a fresh generated project from new_original.
-    # Files without transformations are copied without modification.
+def read_source_file(file_path: Path) -> str:
+    # Read one source file.
+    if not file_path.exists():
+        raise FileNotFoundError(f"Source file was not found: {file_path}")
 
+    if not file_path.is_file():
+        raise IsADirectoryError(f"Source path is not a file: {file_path}")
+    
+    encodings = ("utf-8", "cp1254")
+    for encoding in encodings:
+        try:
+            return file_path.read_text(encoding=encoding)
+
+        except UnicodeDecodeError:
+            continue
+
+    raise UnicodeError(f"Source file could not be decoded: {file_path}. Tried encodings: {', '.join(encodings)}")
+
+
+def read_support_file_content(file_path: Path) -> str:
+    # Read a support file without changing its line endings.
+    if not file_path.exists():
+        raise FileNotFoundError(f"Support file was not found: {file_path}")
+
+    if not file_path.is_file():
+        raise IsADirectoryError(f"Support file path is not a file: {file_path}")
+    
+    # Satır sonundaki '\r\n' ya da '\n' hangisi varsa değişmesin diye readText() değil readByte() ile okuyup decode ile texte çevirdik.
+    file_bytes = file_path.read_bytes()
+
+    encodings = ("utf-8", "cp1254")
+    for encoding in encodings:
+        try:
+            return file_bytes.decode(encoding)
+
+        except UnicodeDecodeError:
+            continue
+
+    raise UnicodeError(f"Support file could not be decoded: {file_path}. Tried encodings: {', '.join(encodings)}")
+
+
+def find_project_files(source_directory: Path, allowed_extensions: set[str],) -> Dict[str, Path]:
+    # Find files with the requested extensions recursively.
     if not source_directory.exists():
-        raise FileNotFoundError("New original directory was not found: " f"{source_directory}")
+        raise FileNotFoundError(f"Source directory was not found: {source_directory}")
 
     if not source_directory.is_dir():
-        raise NotADirectoryError("New original path is not a directory: " f"{source_directory}")
+        raise NotADirectoryError(f"Source path is not a directory: {source_directory}")
 
-    if (source_directory.resolve() == output_directory.resolve()):
-        raise ValueError("The input and output directories must be different.")
+    project_files = {}
 
-    if output_directory.exists():
-        shutil.rmtree(output_directory) # deletes the directory
+    for file_path in source_directory.rglob("*"):
+        if not file_path.is_file():
+            continue
 
-    shutil.copytree(source_directory, output_directory)
+        if file_path.suffix.lower() not in allowed_extensions:
+            continue
+
+        relative_file_path = (file_path.relative_to(source_directory).as_posix())
+        project_files[relative_file_path] = file_path
+
+    return project_files
 
 
-def build_transformation_search_regions(source_text: str, transformation: Dict[str, Any]) -> Tuple[List[Dict[str, Any]], Optional[str], List[str]]:
-    # Build only the source regions allowed by the transformation scope.
-    parse_result = parse_source(source_text)
+def get_original_search_regions(
+    block: Dict[str, Any],
+    original_source: str,
+    original_functions: List[Dict[str, Any]],
+    original_non_function_regions: List[Dict[str, Any]],
+) -> Tuple[Optional[List[Dict[str, Any]]], Optional[str]]:
+    # Rehost içinden çıkarılan conditional block için şunu belirler: Bu block’un original hâlini eski original dosyanın hangi kısmında aramalıyım?
+    # function scope → yalnızca aynı fonksiyonun gövdesinde ara
+    # include scope → yalnızca fonksiyonların dışında ara
+    # global scope → yalnızca fonksiyonların dışında ara
 
-    functions = parse_result["functions"]
-    parser_warnings = parse_result["warnings"]
+    # Function transformations must be verified only inside the matching function.
+    if block["scope"] == "function":
+        function_name = block["function_name"]
+        function_signature = block["function_signature"]
 
-    scope = transformation.get("scope")
+        if (function_name is None or function_signature is None):
+            return (None, "Function information is missing.")
 
-    if scope == "function":
-        function_information = transformation.get("function") 
-
-        if not isinstance(function_information, dict):
-            return ([], "Function information is missing from the transformation.", parser_warnings)
-
-        function_name = function_information.get("name")
-        function_signature = function_information.get("signature")
-
-        if (not function_name or not function_signature):
-            return ([], "Function name or signature is missing from the transformation.", parser_warnings)
-
-        matching_function, error = find_matching_function(functions, function_name, function_signature)
+        matching_function, error = find_matching_function(original_functions, function_name, function_signature)
 
         if matching_function is None:
-            return ([], error, parser_warnings)
+            return None, error
 
-        # Search only inside the function body.
+        # Search only inside the function body. (excluding {})
         body_start = (matching_function["body_start"] + 1)
         body_end = (matching_function["body_end"] - 1)
 
@@ -71,858 +136,1025 @@ def build_transformation_search_regions(source_text: str, transformation: Dict[s
                 {
                     "start": body_start,
                     "end": body_end,
-                    "text": source_text[body_start:body_end],
+                    "text": original_source[body_start:body_end],
                 }
             ],
-            None,
-            parser_warnings
+            None
         )
 
-    if scope in {"include", "global"}:
+    # Include and global transformations must be searched only outside functions. 
+    # Separate regions prevent code on opposite sides of a function from becoming one false match.
+    if block["scope"] in {"include", "global"}:
+        return original_non_function_regions, None
+    
+    return None, f"Unsupported scope: {block['scope']}"
+
+
+def select_matching_original_branch(block: Dict[str, Any], search_regions: List[Dict[str, Any]]
+) -> Tuple[Optional[Dict[str, Any]], Optional[str], List[Dict[str, Any]],]:
+    # Determine which conditional branch came from the old original file.
+    branches = block.get("branches")
+
+    if not isinstance(branches, list) or not branches:
         return (
-            build_non_function_regions(source_text, functions),
             None,
-            parser_warnings
+            "The conditional block does not contain a valid branches list.",
+            [],
         )
 
-    return (
-        [],
-        f"Unsupported transformation scope: {scope}",
-        parser_warnings
-    )
+    branch_results = []
 
+    for branch in branches:
+        branch_text = branch.get("content")
 
-def insert_text_at_position(source_text: str, insertion_index: int, content: str) -> Tuple[str, int, int]:
-    # Insert a block while keeping it separated from surrounding code.
-    prefix = source_text[:insertion_index]
-    suffix = source_text[insertion_index:]
+        # An empty branch cannot represent a continuous code section taken from the old original source.
+        if (not isinstance(branch_text, str) or not normalize_code_text(branch_text)):
+            occurrence_count = 0
 
-    text_to_insert = content.strip("\r\n")
-
-    if prefix and not prefix.endswith("\n"):
-        text_to_insert = "\n" + text_to_insert
-
-    if suffix and not suffix.startswith("\n"):
-        text_to_insert = text_to_insert + "\n"
-
-    updated_source = prefix + text_to_insert + suffix
-
-    return (updated_source, insertion_index, insertion_index + len(text_to_insert),)
-
-
-def apply_insertion_transformation(source_text: str, transformation: Dict[str, Any]) -> Tuple[str, Dict[str, Any]]:
-    # Apply a positional insertion only when its scope and insertion point can be identified safely.
-    transformation_id = transformation.get("id", "unknown")
-
-    regions, error, parser_warnings = (build_transformation_search_regions(source_text, transformation))
-
-    content = transformation.get("content")
-    position = transformation.get("position")
-    anchor = transformation.get("anchor")
-
-    result = {
-        "transformation_id": transformation_id,
-        "file": transformation.get("file"),
-        "scope": transformation.get("scope"),
-        "function_name": (get_transformation_function_name(transformation)),
-        "expected_match": (anchor if isinstance(anchor, str) else ""),
-        "result": "SKIPPED",
-        "reason": "",
-        "match_count": 0,
-        "fallback_match_count": 0,
-        "parser_warnings": parser_warnings,
-        "applied_count": 0,
-        "ranges": [],
-    }
-
-    # Parser warnings mean that function and non-function boundaries may be unreliable.
-    if parser_warnings:
-        result["reason"] = ("The source produced parser warnings, so the insertion was not applied.")
-        return source_text, result
-
-    if error is not None:
-        result["reason"] = error
-        return source_text, result
-
-    if not isinstance(content, str) or not content.strip():
-        result["reason"] = ("The insertion does not contain valid content.")
-        return source_text, result
-
-    # Check whether the complete conditional block is already present in the required scope. This keeps repeated application idempotent.
-    content_matches = find_matches_in_regions(source_text, regions, content)
-
-    if len(content_matches) == 1:
-        existing_match = content_matches[0]
-
-        result.update(
-            {
-                "result": "ALREADY_APPLIED",
-                "reason": "The complete insertion content is already present in the required scope.",
-                "match_count": 0,
-                "applied_count": 0,
-                "ranges": [
-                    {
-                        "start": existing_match["start"],
-                        "end": existing_match["end"],
-                    }
-                ],
-            }
-        )
-
-        return source_text, result
-
-    if len(content_matches) > 1:
-        result.update(
-            {
-                "reason": "The complete insertion content was found more than once in the required scope. The existing code is ambiguous.",
-                "match_count": len(content_matches),
-            }
-        )
-
-        return source_text, result
-
-    # Function-boundary insertions do not use an anchor.
-    if position in {"function_start", "function_end"}:
-        if transformation.get("scope") != "function":
-            result["reason"] = (f"The {position} position can only be used with function-scope transformations.")
-            return source_text, result
-
-        if len(regions) != 1:
-            result["reason"] = ("A unique function body region could not be identified.")
-            return source_text, result
-
-        function_region = regions[0]
-
-        if position == "function_start":
-            insertion_index = function_region["start"]
         else:
-            insertion_index = function_region["end"]
+            occurrence_count = count_normalized_occurrences(search_regions, branch_text,)
 
-        updated_source, inserted_start, inserted_end = insert_text_at_position(
-            source_text=source_text,
-            insertion_index=insertion_index,
-            content=content,
-        )
-
-        result.update(
+        branch_results.append(
             {
-                "result": "APPLIED",
-                "reason": (f"The insertion was applied at the {position} position."),
-                "applied_count": 1,
-                "start": inserted_start,
-                "end": inserted_end,
+                "directive": branch.get("directive"),
+                "condition": branch.get("condition"),
+                "text": branch_text,
+                "occurrence_count": occurrence_count,
             }
         )
-        return updated_source, result
 
-    # Anchor-based insertions require exactly one anchor match.
-    if position not in {"before", "after"}:
-        result["reason"] = (f"Unsupported insertion position: {position}")
-        return source_text, result
+    found_matches = [result for result in branch_results if result["occurrence_count"] > 0]
 
-    if not isinstance(anchor, str) or not anchor.strip():
-        result["reason"] = ("The anchor-based insertion does not contain a valid anchor.")
-        return source_text, result
+    if len(found_matches) == 1:
+        selected_match = found_matches[0]
 
-    anchor_matches = find_matches_in_regions(source_text, regions, anchor)
+        if (selected_match["occurrence_count"] > 1 and block["scope"] != "function"):
+            return (
+                None,
+                "The matching branch was found more than once outside function scope, so the match is ambiguous.",
+                branch_results,
+            )
+        
 
-    result["match_count"] = len(anchor_matches)
+        selected_block = dict(block)
 
-    used_position = position
-    used_anchor = anchor
-    used_fallback = False
+        selected_block["matched_branch_content"] = selected_match["text"]
 
-    if len(anchor_matches) == 0:
-        fallback_position = transformation.get("fallback_position")
-        fallback_anchor = transformation.get("fallback_anchor")
+        selected_block["matched_branch"] = {
+            "directive": selected_match["directive"],
+            "condition": selected_match["condition"],
+        }
 
-        fallback_is_valid = (
-            fallback_position in {"before", "after"}
-            and isinstance(fallback_anchor, str)
-            and fallback_anchor.strip()
+        return selected_block, None, branch_results
+
+    result_details = []
+
+    for result in branch_results:
+        directive = result["directive"]
+        condition = result["condition"]
+
+        if condition is None:
+            branch_description = f"#{directive}"
+        else:
+            branch_description = f"#{directive} {condition}"
+
+        result_details.append(
+            f"{result['occurrence_count']} match(es)"
         )
 
-        if not fallback_is_valid:
-            result["reason"] = ("The primary insertion anchor was not found in the required scope and no valid fallback anchor is available.")
-            return source_text, result
+    result_details_text = ", ".join(result_details)
 
-        fallback_matches = find_matches_in_regions(source_text, regions, fallback_anchor)
-        result["fallback_match_count"] = len(fallback_matches)
+    if not found_matches:
+        return (
+            None,
+            "None of the conditional branches was found as one continuous block in the expected scope. "
+            f"Results: {result_details_text}.",
+            branch_results,
+        )
 
-        if len(fallback_matches) == 0:
-            result["reason"] = ("Neither the primary insertion anchor nor the fallback anchor was found in the required scope.")
-            return source_text, result
-
-        if len(fallback_matches) > 1:
-            result["reason"] = ("The primary insertion anchor was not found and the fallback anchor was found more than once. The insertion point is ambiguous.")
-            return source_text, result
-
-        anchor_matches = fallback_matches
-        used_position = fallback_position
-        used_anchor = fallback_anchor
-        used_fallback = True
-
-    elif len(anchor_matches) > 1:
-        result["reason"] = ("The primary insertion anchor was found more than once in the required scope. The insertion point is ambiguous.")
-        return source_text, result
-
-    anchor_match = anchor_matches[0]
-
-    if used_position == "before":
-        insertion_index = anchor_match["start"]
-    else:
-        insertion_index = anchor_match["end"]
-
-    updated_source, inserted_start, inserted_end = insert_text_at_position(
-        source_text=source_text,
-        insertion_index=insertion_index,
-        content=content,
-    )
-
-    result.update(
-        {
-            "result": "APPLIED",
-            "reason": (
-                f"The primary anchor was not found, so the fallback anchor was used and the content was inserted {used_position} it."
-                if used_fallback
-                else
-                f"The primary insertion anchor was found exactly once and the content was inserted {used_position} it."),
-            "used_anchor": used_anchor,
-            "used_position": used_position,
-            "used_fallback": used_fallback,
-            "applied_count": 1,
-            "ranges": [
-                {
-                    "start": inserted_start,
-                    "end": inserted_end,
-                }
-            ],
-        }
-    )
-    return updated_source, result
+    if len(found_matches) > 1:
+        return (
+            None,
+            "More than one conditional branch was found in the old original source, so the original branch is ambiguous. "
+            f"Results: {result_details_text}.",
+            branch_results,
+        )
 
 
-def get_transformation_function_name(transformation: Dict[str, Any]) -> Optional[str]:
-    # Return the expected function name for function-scope transformations.
-    function_information = transformation.get("function")
+# ----- ORIGINALDE OLMAYIP SADECE REHOSTTA OLAN KODLARI EKLEMEK İÇİN -----
+def determine_function_insertion_position(block: Dict[str, Any], rehost_source: str, rehost_functions: List[Dict[str, Any]]) -> Optional[str]:
+    # Determine whether a rehost-only conditional block is at the beginning or end of its containing function.
+    function_name = block.get("function_name")
+    function_signature = block.get("function_signature")
 
-    if not isinstance(function_information,dict):
+    if function_name is None or function_signature is None:
         return None
 
-    function_name = function_information.get("name")
+    matching_function, error = find_matching_function(rehost_functions, function_name, function_signature)
 
-    if not isinstance(function_name, str):
+    if matching_function is None:
         return None
 
-    return function_name
+    code_before_block = rehost_source[matching_function["body_start"] + 1:block["start"]]
+    code_after_block = rehost_source[block["end"]:matching_function["body_end"] - 1]
 
+    if not normalize_code_text(code_before_block):
+        return "function_start"
 
-## ----- This were added for occurence > 1, still do it case -----
+    if not normalize_code_text(code_after_block):
+        return "function_end"
 
-def match_is_inside_replacement(match: Dict[str, Any], replacement_matches: List[Dict[str, Any]]) -> bool:
-    # An original-code match may be located inside an already-applied conditional replacement. 
-    # Ignore it to prevent nested conditionals.
-    return any(replacement_match["start"] <= match["start"] and match["end"] <= replacement_match["end"] for replacement_match in replacement_matches)
+    return None
 
+def contains_unstable_preprocessor_directive(text: str) -> bool:
+    # Permit #include anchors, but reject conditional and macro directives.
+    for line in text.splitlines():
+        normalized_line = normalize_code_text(line)
 
-def matches_overlap(matches: List[Dict[str, Any]]) -> bool:
-    # Multiple matches are safe only when their source ranges do not overlap.
-    ordered_matches = sorted(matches, key=lambda match: match["start"])
+        if not normalized_line:
+            continue
 
-    for previous_match, current_match in zip(ordered_matches, ordered_matches[1:]):
-        if current_match["start"] < previous_match["end"]:
+        if (normalized_line.startswith("#") and not normalized_line.startswith("#include")):
             return True
 
     return False
 
 
-def apply_replacement_to_matches(source_text: str, matches: List[Dict[str, Any]], replacement: str) -> str:
-    # Apply replacements from right to left.
-    # This prevents earlier character positions from changing.
-    updated_source = source_text
+def find_unique_following_anchor(block: Dict[str, Any], rehost_source: str, rehost_functions: List[Dict[str, Any]], original_search_regions: List[Dict[str, Any]]) -> Optional[str]:
+    # Find a unique piece of code after a rehost-only conditional  block so the block can be inserted immediately before it.
+    function_name = block.get("function_name")
+    function_signature = block.get("function_signature")
 
-    for match in sorted(matches, key=lambda item: item["start"],reverse=True):
-        updated_source = (updated_source[:match["start"]] + replacement + updated_source[match["end"]:])
+    if function_name is None or function_signature is None:
+        return None
 
-    return updated_source
-## ----------------------------------------------------------------
+    matching_function, error = find_matching_function(rehost_functions, function_name, function_signature)
 
-def apply_single_transformation(source_text: str,transformation: Dict[str, Any]) -> Tuple[str, Dict[str, Any]]:
-    # Apply one transformation only when exactly one safe match exists.
-    # The original source is returned unchanged when the transformation cannot be applied safely or is already present.
-    operation = transformation.get("operation", "replace")
+    if matching_function is None:
+        return None
 
-    if operation == "insert":
-        return apply_insertion_transformation(source_text=source_text, transformation=transformation)
+    code_after_block = rehost_source[block["end"]:matching_function["body_end"] - 1]
 
-    if operation != "replace":
-        transformation_id = transformation.get("id", "unknown")
+    candidate_lines = []
+    meaningful_line_count = 0
 
-        return source_text, {
-            "transformation_id": transformation_id,
-            "file": transformation.get("file"),
-            "scope": transformation.get("scope"),
-            "function_name": (get_transformation_function_name(transformation)),
-            "expected_match": "",
-            "result": "SKIPPED",
-            "reason": (f"Unsupported transformation operation: {operation}"),
-            "match_count": 0,
-            "parser_warnings": [],
-            "applied_count": 0,
-            "ranges": [],
-        }
+    for line in code_after_block.splitlines(keepends=True):
+        candidate_lines.append(line)
 
-    transformation_id = transformation.get("id","unknown")
+        # Empty lines and comments do not make an anchor reliable.
+        if not normalize_code_text(line):
+            continue
 
-    regions, error, parser_warnings = (build_transformation_search_regions(source_text, transformation))
+        meaningful_line_count += 1
+        candidate_text = "".join(candidate_lines).strip()
+        occurrence_count = count_normalized_occurrences(original_search_regions, candidate_text)
 
-    result = {
-        "transformation_id": transformation_id,
-        "file": transformation.get("file"),
-        "scope": transformation.get("scope"),
-        "function_name": (get_transformation_function_name(transformation)),
-        "expected_match": transformation.get("match", ""),
-        "result": "SKIPPED",
-        "reason": "",
-        "match_count": 0,
-        "replacement_match_count": 0,
-        "applied_count": 0,
-        "parser_warnings": parser_warnings,
-        "ranges": [],
+        if occurrence_count == 1:
+            return candidate_text
+
+        # If the candidate does not exist at all, extending it cannot turn it into a valid continuous match.
+        if occurrence_count == 0:
+            return None
+
+        # Avoid using an unnecessarily large anchor.
+        if meaningful_line_count >= 5:
+            return None
+
+    return None
+
+
+def find_unique_preceding_anchor(block: Dict[str, Any], rehost_source: str, rehost_functions: List[Dict[str, Any]], original_search_regions: List[Dict[str, Any]]) -> Optional[str]:
+    # Find a unique piece of code before a rehost-only conditional block so the block can be inserted immediately after it.
+    function_name = block.get("function_name")
+    function_signature = block.get("function_signature")
+
+    if function_name is None or function_signature is None:
+        return None
+
+    matching_function, error = find_matching_function(rehost_functions,function_name,function_signature)
+
+    if matching_function is None:
+        return None
+
+    code_before_block = rehost_source[matching_function["body_start"] + 1:block["start"]]
+    lines_before_block = code_before_block.splitlines(keepends=True)
+
+    candidate_lines = []
+    meaningful_line_count = 0
+
+    # Start with the line closest to the conditional block and gradually extend the candidate upward.
+    for line in reversed(lines_before_block):
+        candidate_lines.insert(0, line)
+
+        # Empty lines and comments do not make an anchor reliable.
+        if not normalize_code_text(line):
+            continue
+
+        meaningful_line_count += 1
+        candidate_text = "".join(candidate_lines).strip()
+        occurrence_count = count_normalized_occurrences(original_search_regions, candidate_text)
+
+        if occurrence_count == 1:
+            return candidate_text
+
+        # If the closest candidate does not exist in the original, extending it upward cannot produce a continuous match.
+        if occurrence_count == 0:
+            return None
+
+        # Avoid using an unnecessarily large anchor.
+        if meaningful_line_count >= 5:
+            return None
+    return None
+
+
+def find_containing_non_function_region(block: Dict[str, Any], rehost_non_function_regions: List[Dict[str, Any]],
+) -> Optional[Dict[str, Any]]:
+    # Find the non-function source region that completely
+    # contains the conditional block.
+    for region in rehost_non_function_regions:
+        if (
+            region["start"] <= block["start"]
+            and block["end"] <= region["end"]
+        ):
+            return region
+
+    return None
+
+
+def find_unique_following_non_function_anchor(block: Dict[str, Any], rehost_source: str, rehost_non_function_regions: List[Dict[str, Any]],original_search_regions: List[Dict[str, Any]]) -> Optional[str]:
+    # Find a unique file-level code fragment after a rehost-only conditional block.
+    containing_region = find_containing_non_function_region(block=block, rehost_non_function_regions=rehost_non_function_regions,)
+
+    if containing_region is None:
+        return None
+
+    code_after_block = rehost_source[block["end"]:containing_region["end"]]
+
+    candidate_lines = []
+    meaningful_line_count = 0
+
+    for line in code_after_block.splitlines(keepends=True):
+        candidate_lines.append(line)
+
+        if not normalize_code_text(line):
+            continue
+
+        meaningful_line_count += 1
+        candidate_text = "".join(candidate_lines).strip()
+        
+        # #define SENSOR_H, #endif, #ifdef gibi kırılgan anchor’lar kullanılmaz ama #include "x.h" kullanılabilir.
+        if contains_unstable_preprocessor_directive(candidate_text):
+            return None
+        
+        occurrence_count = count_normalized_occurrences(original_search_regions, candidate_text)
+
+        if occurrence_count == 1:
+            return candidate_text
+
+        if occurrence_count == 0:
+            return None
+
+        if meaningful_line_count >= 5:
+            return None
+
+    return None
+
+def find_unique_preceding_non_function_anchor(block: Dict[str, Any],rehost_source: str,rehost_non_function_regions: List[Dict[str, Any]],original_search_regions: List[Dict[str, Any]]) -> Optional[str]:
+    # Find a unique file-level code fragment before a rehost-only conditional block.
+
+    containing_region = find_containing_non_function_region(
+        block=block,
+        rehost_non_function_regions=rehost_non_function_regions,
+    )
+    if containing_region is None:
+        return None
+
+    code_before_block = rehost_source[containing_region["start"]:block["start"]]
+    lines_before_block = code_before_block.splitlines(keepends=True)
+
+    candidate_lines = []
+    meaningful_line_count = 0
+
+    for line in reversed(lines_before_block):
+        candidate_lines.insert(0, line)
+
+        if not normalize_code_text(line):
+            continue
+
+        meaningful_line_count += 1
+        candidate_text = "".join(candidate_lines).strip()
+
+        # #define SENSOR_H, #endif, #ifdef gibi kırılgan anchor’lar kullanılmaz ama #include "x.h" kullanılabilir.
+        if contains_unstable_preprocessor_directive(candidate_text):
+            return None
+        
+        occurrence_count = count_normalized_occurrences(original_search_regions, candidate_text)
+
+        if occurrence_count == 1:
+            return candidate_text
+
+        if occurrence_count == 0:
+            return None
+
+        if meaningful_line_count >= 5:
+            return None
+
+    return None
+# ------------------------------------------------------------------------
+
+# ----- build transformations --------------------------------------------
+def build_transformation(transformation_number: int, relative_file_path: str, block: Dict[str, Any]) -> Dict[str, Any]:
+    # Store only information required by apply_transformations.py.
+    matched_branch_content = block.get("matched_branch_content")
+
+    if (not isinstance(matched_branch_content, str) or not normalize_code_text(matched_branch_content)):
+        raise ValueError("The selected conditional block does not contain valid matched branch content.")
+
+    full_text = block.get("full_text")
+
+    if not isinstance(full_text, str) or not full_text.strip():
+        raise ValueError("The selected conditional block does not contain valid replacement text.")
+
+    transformation = {
+        "id": f"conditional_{transformation_number}",
+        "file": relative_file_path,
+        "scope": block["scope"],
+        "match": matched_branch_content.strip(),
+        "replacement": full_text.rstrip("\r\n"),
     }
 
-    # Parser warnings mean that source boundaries may be unreliable.
-    if parser_warnings:
-        result["reason"] = ("The source produced parser warnings, so the transformation was not applied.")
-        return source_text, result
-
-    if error is not None:
-        result["reason"] = error
-        return source_text, result
-
-    replacement = transformation.get("replacement")
-
-    if not isinstance(replacement, str):
-        result["reason"] = ("The transformation does not contain a valid replacement string.")
-        return source_text, result
-
-    replacement_matches = find_matches_in_regions(source_text, regions, replacement)
-
-    result["replacement_match_count"] = len(replacement_matches)
-
-    # Then locate every occurrence of the old original code.
-    original_matches = find_matches_in_regions(source_text, regions, transformation.get("match", ""))
-
-    # The original branch also exists inside a complete conditional block.
-    # Exclude such matches to avoid creating nested #ifdef blocks.
-    matches_to_apply = [
-        match
-        for match in original_matches
-        if not match_is_inside_replacement(match,replacement_matches)
-    ]
-
-    result["match_count"] = len(matches_to_apply)
-
-    if not matches_to_apply:
-        if replacement_matches:
-            result.update(
-                {
-                    "result": "ALREADY_APPLIED",
-                    "reason": ("No untransformed matches remain in the required scope. "
-                         f"The complete replacement is already present {len(replacement_matches)} time(s)."
-                    ),
-                    "match_count": 1,
-                    "applied_count": 0,
-                        "ranges": [
-                            {
-                                "start": match["start"],
-                                "end": match["end"],
-                            }
-                            for match in replacement_matches
-                        ],
-                }
-            )
-
-        else:
-            result["reason"] = ("The expected code was not found in the required scope.")
-
-        return source_text, result
-
-    # Multiple automatic replacements are currently allowed only
-    # inside one verified function.
-    if (len(matches_to_apply) > 1 and transformation.get("scope") != "function"):
-        result["reason"] = ("The expected code was found more than once outside function scope. The match is ambiguous.")
-        return source_text, result
-
-    if matches_overlap(matches_to_apply):
-        result["reason"] = ("The expected code produced overlapping matches, so the transformation was not applied.")
-        return source_text, result
-
-    updated_source = apply_replacement_to_matches(source_text,matches_to_apply,replacement)
-
-    applied_ranges = [
-        {
-            "start": match["start"],
-            "end": match["end"],
+    # Function information is required only for function-scope transformations.
+    if block["scope"] == "function":
+        transformation["function"] = {
+            "name": block["function_name"],
+            "signature": block["function_signature"],
         }
-        for match in matches_to_apply
-    ]
 
-    result.update(
-        {
-            "result": "APPLIED",
-            "reason": (
-                "The expected code was found "
-                f"{len(matches_to_apply)} time(s) "
-                "in the required scope. "
-                "All matches were transformed."
-            ),
-            "applied_count": len(matches_to_apply),
-            "ranges": applied_ranges,
+    return transformation
+
+
+def build_insertion_transformation(transformation_number: int, relative_file_path: str, block: Dict[str, Any], position: str) -> Dict[str, Any]:
+    # Store a rehost-only conditional block as a positional insertion.
+    return {
+        "id": f"conditional_{transformation_number}",
+        "file": relative_file_path,
+        "scope": "function",
+        "operation": "insert",
+        "position": position,
+        "content": block["full_text"].rstrip("\r\n"),
+        "function": {
+            "name": block["function_name"],
+            "signature": block["function_signature"],
+        },
+    }
+
+def build_anchor_insertion_transformation(transformation_number: int, relative_file_path: str, block: Dict[str, Any], position: str, anchor: str, fallback_position: Optional[str] = None, fallback_anchor: Optional[str] = None
+) -> Dict[str, Any]:
+    # Store a rehost-only conditional block as an insertion immediately before or after a unique anchor.
+    transformation = {
+        "id": f"conditional_{transformation_number}",
+        "file": relative_file_path,
+        "scope": block["scope"],
+        "operation": "insert",
+        "position": position,
+        "anchor": anchor,
+        "content": block["full_text"].rstrip("\r\n"),
+    }
+
+    # Store the opposite-side anchor as a fallback when available.
+    if (
+        fallback_position in {"before", "after"}
+        and isinstance(fallback_anchor, str)
+        and fallback_anchor.strip()
+    ):
+        transformation["fallback_position"] = fallback_position
+        transformation["fallback_anchor"] = fallback_anchor
+
+    if block["scope"] == "function":
+        transformation["function"] = {
+            "name": block["function_name"],
+            "signature": block["function_signature"],
         }
-    )
 
-    return updated_source, result
+    return transformation
+# ------------------------------------------------------------------------
 
+def build_report_entry(relative_file_path: str, block: Dict[str, Any], result: str, reason: str,transformation_id: Optional[str] = None,transformation: Optional[Dict[str, Any]] = None,) -> Dict[str, Any]:
+    # Keep extraction details outside the transformation JSON.
+    match_text = block.get("matched_branch_content", "")
 
-def load_transformations(transformations_file: Path) -> Tuple[List[Dict[str, Any]], List[Dict[str, str]]]:
-    # Read and perform basic validation on the transformation JSON.
-    if not transformations_file.exists():
-        raise FileNotFoundError("Transformation file was not found: " f"{transformations_file}")
+    if not isinstance(match_text, str):
+        match_text = ""
 
-    try:
-        transformation_data = json.loads(transformations_file.read_text(encoding="utf-8"))
+    matched_branch = block.get("matched_branch")
 
-    except json.JSONDecodeError as error:
-        raise ValueError("Transformation file contains invalid JSON: "f"{error}") from error
+    branch_directive = None
+    branch_condition = None
 
-    if not isinstance(transformation_data, dict):
-        raise ValueError("The root of the transformation JSON must be an object.")
+    if isinstance(matched_branch, dict):
+        branch_directive = matched_branch.get("directive")
+        branch_condition = matched_branch.get("condition")
 
-    transformations = transformation_data.get("transformations")
+    operation = "replace"
+    position = None
+    anchor = None
+    fallback_position = None
+    fallback_anchor = None
 
-    if not isinstance(transformations, list):
-        raise ValueError("The transformation JSON must contain a transformations list.")
-
-    for index, transformation in enumerate(transformations, start=1):
-        if not isinstance(transformation, dict):
-            raise ValueError(f"Transformation {index} must be an object.")
-
+    if isinstance(transformation, dict):
         operation = transformation.get("operation", "replace")
+        position = transformation.get("position")
+        anchor = transformation.get("anchor")
+        fallback_position = transformation.get("fallback_position")
+        fallback_anchor = transformation.get("fallback_anchor")
 
-        # These fields are required for every transformation type.
-        required_fields = {"id", "file", "scope",}
+    return {
+        "result": result,
+        "transformation_id": transformation_id,
+        "file": relative_file_path,
+        "scope": block["scope"],
+        "function_name": block["function_name"],
+        "operation": operation,
+        "position": position,
+        "anchor": anchor,
+        "fallback_position": fallback_position,
+        "fallback_anchor": fallback_anchor,
+        "matched_branch_directive": branch_directive,
+        "matched_branch_condition": branch_condition,
+        "match_text": match_text.strip(),
+        "reason": reason,
+    }
 
-        if operation == "replace":
-            required_fields.update({"match", "replacement",})
 
-        elif operation == "insert":
-            required_fields.update({"position", "content",})
+def extract_transformations(original_source: str, rehost_source: str, original_parse_result: Dict[str, Any], rehost_parse_result: Dict[str, Any], relative_file_path: str, starting_transformation_number: int
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    # Verify each conditional block from the old rehost file against the old original file.
+    transformations = []
+    report_entries = []
 
-        else:
-            raise ValueError(f"Transformation {index} contains an unsupported operation: {operation}")
+    original_functions = (original_parse_result["functions"])
+    conditional_blocks = (rehost_parse_result["conditional_blocks"])
+    transformation_candidate_blocks = [block for block in conditional_blocks if block["is_target"]]
+    rehost_functions = rehost_parse_result["functions"]
+    parser_warnings = (original_parse_result["warnings"] + rehost_parse_result["warnings"])
 
-        missing_fields = (required_fields - transformation.keys())
+    # Parser warnings mean that source boundaries may be unreliable.
+    # Skip every block from the file instead of producing transformations from partially parsed input.
+    if parser_warnings:
+        for block in transformation_candidate_blocks:
+            report_entries.append(
+                build_report_entry(
+                    relative_file_path,
+                    block,
+                    result="SKIPPED",
+                    reason=("The file produced parser warnings, so no transformation was extracted from this block.")
+                )
+            )
+        return transformations, report_entries
+    
+    # These regions depend only on the parsed file, so build them once per file.
+    original_non_function_regions = build_non_function_regions(original_source, original_functions,)
+    rehost_non_function_regions = build_non_function_regions(rehost_source, rehost_functions,)
 
-        if missing_fields:
-            missing_text = ", ".join(sorted(missing_fields))
-
-            raise ValueError(f"Transformation {index} is missing required fields: {missing_text}")
-
-        # Anchor-based insertions also require an anchor.
-        if (operation == "insert" and transformation.get("position") in {"before", "after",} and "anchor" not in transformation):
-            raise ValueError(f"Transformation {index} is an anchor-based insertion but does not contain an anchor.")
+    for block in transformation_candidate_blocks:
         
-    # support_files is optional so older transformation JSON files
-    # containing only transformations remain valid.
-    support_files = transformation_data.get("support_files", [])
-
-    if not isinstance(support_files, list):
-        raise ValueError("The support_files value must be a list.")
-
-    normalized_support_paths = set()
-
-    for index, support_file in enumerate(support_files, start=1):
-        if not isinstance(support_file, dict):
-            raise ValueError(f"Support file {index} must be an object.")
-
-        missing_fields = ({"path", "content"} - support_file.keys())
-
-        if missing_fields:
-            missing_text = ", ".join(sorted(missing_fields))
-            raise ValueError(
-                f"Support file {index} is missing "
-                f"required fields: {missing_text}"
-            )
-
-        path = support_file.get("path")
-        content = support_file.get("content")
-
-        if (not isinstance(path, str) or not path.strip()):
-            raise ValueError(f"Support file {index} must contain a non-empty string path.")
-
-        if not isinstance(content, str):
-            raise ValueError(f"Support file {index} must contain string content.")
-
-        normalized_path = (normalize_relative_file_path(path))
-
-        if normalized_path in normalized_support_paths:
-            raise ValueError(f"The support_files list contains the same path more than once: {normalized_path}")
-
-        normalized_support_paths.add(normalized_path)
-
-    return transformations, support_files
-
-
-def normalize_relative_file_path(file_path: str) -> str:
-    # Use one consistent separator when comparing JSON file paths.
-    return file_path.replace(
-        "\\",
-        "/"
-    )
-
-
-def group_transformations_by_file(transformations: List[Dict[str, Any]]) -> Dict[str, List[Dict[str, Any]]]:
-    # Group transformations by their normalized relative file path.
-    grouped_transformations = {}
-
-    for transformation in transformations:
-        relative_file_path = (normalize_relative_file_path(str(transformation.get("file", ""))))
-
-        grouped_transformations.setdefault(relative_file_path, []).append(transformation)
-
-    return grouped_transformations
-
-
-def resolve_project_file(project_directory: Path, relative_file_path: str) -> Tuple[Optional[Path], Optional[str]]:
-    # Resolve a JSON file path without allowing it to leave the project directory.
-    normalized_path = (normalize_relative_file_path(relative_file_path))
-    relative_path = Path(normalized_path)
-
-    if relative_path.is_absolute():
-        return (None, "The transformation contains an absolute file path.")
-
-    if ".." in relative_path.parts:
-        return (None, "The transformation file path leaves the project directory.")
-
-    project_directory_resolved = (project_directory.resolve())
-
-    resolved_file = (project_directory / relative_path).resolve()
-
-    try:
-        resolved_file.relative_to(project_directory_resolved)
-
-    except ValueError:
-        return (None, "The transformation file path leaves the project directory.")
-
-    return resolved_file, None
-
-def apply_support_files_to_project(output_directory: Path, support_files: List[Dict[str, str]]) -> List[Dict[str, str]]:
-    # Create rehost-only support files from the content stored in JSON.
-    # Existing files copied from new_original are not overwritten.
-    support_file_results = []
-
-    for support_file in support_files:
-        relative_file_path = normalize_relative_file_path(support_file["path"])
-
-        content = support_file["content"]
-
-        output_file, path_error = resolve_project_file(output_directory, relative_file_path)
-
-        if output_file is None:
-            support_file_results.append(
-                {
-                    "result": "SKIPPED",
-                    "file": relative_file_path,
-                    "reason": (path_error or "The support file path is invalid."),
-                }
+        # Target conditional blocks nested inside other target conditional blocks may create overlapping transformations.
+        if (block["has_target_ancestor"] or block["contains_nested_target_conditionals"]):
+            report_entries.append(
+                build_report_entry(
+                    relative_file_path,
+                    block,
+                    result="SKIPPED",
+                    reason=("The target conditional block is nested inside another target conditional block or contains a nested target conditional block."),
+                )
             )
             continue
 
-        # new_original is copied before support files are created.
-        # Therefore, an existing path belongs to new_original and should not be overwritten silently.
-        if output_file.exists():
-            support_file_results.append(
-                {
-                    "result": "SKIPPED",
-                    "file": relative_file_path,
-                    "reason": ("A file with the same path already exists in new_original, so it was not overwritten."),
-                }
+        search_regions, search_error = get_original_search_regions(
+            block=block,
+            original_source=original_source,
+            original_functions=original_functions,
+            original_non_function_regions=original_non_function_regions,
+        )
+
+        if search_regions is None:
+            report_entries.append(
+                build_report_entry(
+                    relative_file_path,
+                    block,
+                    result="SKIPPED",
+                    reason=(search_error or "The search region could not be determined.")
+                )
             )
+
             continue
+
+        (selected_block, branch_selection_error,branch_results,
+        ) = select_matching_original_branch(block, search_regions,)
+
+        if selected_block is None:
+            branches_are_absent = all(result["occurrence_count"] == 0 for result in branch_results)
+
+            # Insertion is allowed only when none of the conditional branches exists in the old original source.
+            if branches_are_absent:
+                insertion_position = None
+                insertion_anchor = None
+                fallback_position = None
+                fallback_anchor = None
+
+                if block["scope"] == "function":
+                    insertion_position = determine_function_insertion_position(
+                        block=block,
+                        rehost_source=rehost_source,
+                        rehost_functions=rehost_functions,
+                    )
+
+                    if insertion_position is None:
+                        following_anchor = find_unique_following_anchor(
+                            block=block,
+                            rehost_source=rehost_source,
+                            rehost_functions=rehost_functions,
+                            original_search_regions=search_regions,
+                        )
+
+                        preceding_anchor = find_unique_preceding_anchor(
+                            block=block,
+                            rehost_source=rehost_source,
+                            rehost_functions=rehost_functions,
+                            original_search_regions=search_regions,
+                        )
+
+                        if following_anchor is not None:
+                            insertion_position = "before"
+                            insertion_anchor = following_anchor
+
+                            if preceding_anchor is not None:
+                                fallback_position = "after"
+                                fallback_anchor = preceding_anchor
+
+                        elif preceding_anchor is not None:
+                            insertion_position = "after"
+                            insertion_anchor = preceding_anchor
+
+                elif block["scope"] in {"include", "global"}:
+                    following_anchor = find_unique_following_non_function_anchor(
+                        block=block,
+                        rehost_source=rehost_source,
+                        rehost_non_function_regions=rehost_non_function_regions,
+                        original_search_regions=search_regions,
+                    )
+
+                    preceding_anchor = find_unique_preceding_non_function_anchor(
+                        block=block,
+                        rehost_source=rehost_source,
+                        rehost_non_function_regions=rehost_non_function_regions,
+                        original_search_regions=search_regions,
+                    )
+
+                    if following_anchor is not None:
+                        insertion_position = "before"
+                        insertion_anchor = following_anchor
+
+                        if preceding_anchor is not None:
+                            fallback_position = "after"
+                            fallback_anchor = preceding_anchor
+
+                    elif preceding_anchor is not None:
+                        insertion_position = "after"
+                        insertion_anchor = preceding_anchor
+
+
+                transformation = None
+
+                if insertion_position in {"function_start", "function_end"}:
+                    transformation = (
+                        build_insertion_transformation(
+                            transformation_number=(starting_transformation_number + len(transformations)),
+                            relative_file_path=relative_file_path,
+                            block=block,
+                            position=insertion_position
+                        )
+                    )
+
+                elif (
+                    insertion_position in {"before", "after"} and insertion_anchor is not None
+                ):
+                    transformation = (
+                        build_anchor_insertion_transformation(
+                            transformation_number=(starting_transformation_number + len(transformations)),
+                            relative_file_path=relative_file_path,
+                            block=block,
+                            position=insertion_position,
+                            anchor=insertion_anchor,
+                            fallback_position=fallback_position,
+                            fallback_anchor=fallback_anchor
+                        )
+                    )
+
+                if transformation is not None:
+                    transformations.append(transformation)
+
+                    report_entries.append(
+                        build_report_entry(
+                            relative_file_path,
+                            block,
+                            result="CREATED",
+                            reason=("None of the conditional branch exists in the old original source. The complete block was stored as an insertion."),
+                            transformation_id=transformation["id"],
+                            transformation=transformation,
+                        )
+                    )
+
+                    continue
+
+            report_entries.append(
+                build_report_entry(
+                    relative_file_path,
+                    block,
+                    result="SKIPPED",
+                    reason=(
+                        "None of the conditional branch exists in the old original source, but no unique and reliable insertion point could be identified."
+                        if branches_are_absent
+                        else (branch_selection_error or "The original branch could not be identified.")
+                    )
+                )
+            )
+
+            continue
+
+        transformation = build_transformation(
+            transformation_number=(starting_transformation_number + len(transformations)),
+            relative_file_path=relative_file_path,
+            block=selected_block,
+        )
+
+        transformations.append(transformation)
+
+        report_entries.append(
+            build_report_entry(
+                relative_file_path,
+                selected_block,
+                result="CREATED",
+                reason=("Conditional branch was found in the expected scope."),
+                transformation_id=(transformation["id"]),
+                transformation=transformation,
+            )
+        )
+
+    return transformations, report_entries
+
+
+def build_support_files(rehost_only_paths: List[str], rehost_files: Dict[str, Path]
+) -> Tuple[List[Dict[str, str]], List[Dict[str, str]], List[str]]:
+    # Store rehost-only source files so apply_transformations.py does not need access to the old rehost directory.
+    support_files = []
+    report_entries = []
+    warnings = []
+
+    for relative_file_path in rehost_only_paths:
+        support_file_path = rehost_files[relative_file_path]
 
         try:
-            # Support files may be inside nested directories.
-            output_file.parent.mkdir(parents=True, exist_ok=True)
+            content = read_support_file_content(support_file_path)
 
-            # write_bytes preserves the line endings stored in the JSON.
-            output_file.write_bytes(content.encode("utf-8"))
-
-        except (OSError, UnicodeEncodeError) as error:
-            support_file_results.append(
+        except (OSError, UnicodeError) as error:
+            reason = f"The rehost-only file could not be stored as UTF-8 or cp1254 content: {error}"
+            report_entries.append(
                 {
                     "result": "SKIPPED",
                     "file": relative_file_path,
-                    "reason": f"The support file could not be created: {error}",
+                    "reason": reason,
                 }
             )
+
+            warnings.append(f"{relative_file_path}: {reason}")
+
             continue
 
-        support_file_results.append(
+        support_files.append(
             {
-                "result": "CREATED",
-                "file": relative_file_path,
-                "reason": "The support file was created from the content stored in the transformation JSON.",
+                "path": relative_file_path,
+                "content": content,
             }
         )
 
-    return support_file_results
+        report_entries.append(
+            {
+                "result": "CREATED",
+                "file": relative_file_path,
+                "reason": "The file exists only in rehost, so its complete content was stored in the JSON.",
+            }
+        )
+
+    return (support_files, report_entries, warnings)
 
 
-def apply_transformations_to_source(source_text: str, transformations: List[Dict[str, Any]]) -> Tuple[str,List[Dict[str, Any]]]:
-    # Apply transformations in their JSON order.
-    # Each transformation searches the latest version of the source, including changes made by previously applied transformations.
-    updated_source = source_text
-    application_results = []
-
-    for transformation in transformations:
-        updated_source, result = (apply_single_transformation(updated_source, transformation))
-
-        application_results.append(result)
-
-    return (updated_source, application_results)
-
-
-def build_file_skip_result(transformation: Dict[str, Any],reason: str) -> Dict[str, Any]:
-    # Create a standard result when a source file cannot be processed.
-    return {
-        "transformation_id": transformation.get("id", "unknown"),
-        "file": transformation.get("file"),
-        "scope": transformation.get("scope"),
-        "function_name": (get_transformation_function_name(transformation)),
-        "expected_match": transformation.get(
-            "match",
-            ""
-        ),
-        "result": "SKIPPED",
-        "reason": reason,
-        "match_count": 0,
-        "replacement_match_count": 0,
-        "applied_count": 0,
-        "parser_warnings": [],
-        "ranges": [],
+def save_transformations_json(transformations: List[Dict[str, Any]], support_files: List[Dict[str, str]], output_file: Path) -> None:
+    # Keep the permanent JSON small and application-focused.
+    output_data = {
+        "transformations": transformations,
+        "support_files": support_files,
     }
 
-
-def apply_transformations_to_project(output_directory: Path,transformations: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    # Apply transformations to their corresponding files inside the generated project.
-    grouped_transformations = (group_transformations_by_file(transformations))
-
-    application_results = []
-
-    for (relative_file_path, file_transformations) in grouped_transformations.items():
-        output_file, path_error = (resolve_project_file(output_directory, relative_file_path))
-
-        if output_file is None:
-            for transformation in file_transformations:
-                application_results.append(build_file_skip_result(transformation, path_error or "The file path is invalid."))
-            continue
-
-        if not output_file.exists():
-            reason = f"The file was not found in new_original: {relative_file_path}"
-
-            for transformation in file_transformations:
-                application_results.append(build_file_skip_result(transformation, reason))
-            continue
-
-        if not output_file.is_file():
-            reason = "The transformation path does not point to a regular file."
-
-            for transformation in file_transformations:
-                application_results.append(build_file_skip_result(transformation, reason))
-            continue
-
-        try:
-            source_text, source_encoding = read_source_with_encoding(output_file)
-
-        except UnicodeDecodeError:
-            reason = ("The file could not be read as UTF-8 or cp1254 text.")
-            for transformation in file_transformations:
-                application_results.append(build_file_skip_result(transformation, reason))
-            continue
-
-
-        updated_source, file_results = (apply_transformations_to_source(source_text, file_transformations))
-        output_file.write_text(updated_source,encoding=source_encoding)
-        application_results.extend(file_results)
-
-    return application_results
+    output_file.write_text(
+        json.dumps(
+            output_data,
+            indent=2,
+            ensure_ascii=False
+        ),
+        encoding="utf-8"
+    )
 
 
 def indent_text(text: str, indentation: str = "    ") -> str:
     # Indent multiline source text for a readable report.
-    lines = text.splitlines()
-    if not lines:
-        return indentation + "<empty>"
-    
-    return "\n".join(indentation + line for line in lines)
+    return "\n".join(indentation + line for line in text.splitlines())
 
 
-def save_application_report(application_results: List[Dict[str, Any]], support_file_results: List[Dict[str, str]], transformation_count: int, transformed_file_count: int, output_file: Path) -> None:
-    # Write a detailed report for applied and skipped transformations.
-    applied_count = sum(result["result"] == "APPLIED" for result in application_results)
-    already_applied_count = sum(result["result"] == "ALREADY_APPLIED" for result in application_results)
-    skipped_count = sum(result["result"] == "SKIPPED" for result in application_results)
+def save_extraction_report(report_entries: List[Dict[str, Any]], support_file_entries: List[Dict[str, str]], parser_warnings: List[str],
+detected_block_count: int, output_file: Path,) -> None:
+    # Create a detailed human-readable extraction report.
+    created_count = sum(
+        entry["result"] == "CREATED"
+        for entry in report_entries
+    )
+    skipped_count = sum(
+        entry["result"] == "SKIPPED"
+        for entry in report_entries
+    )
 
-    created_support_file_count = sum(result["result"] == "CREATED" for result in support_file_results)
-    skipped_support_file_count = sum(result["result"] == "SKIPPED" for result in support_file_results)
-
-    warning_count = sum(len(result.get("parser_warnings", [])) for result in application_results)
+    stored_support_file_count = sum(
+        entry["result"] == "CREATED"
+        for entry in support_file_entries
+    )
+    skipped_support_file_count = sum(
+        entry["result"] == "SKIPPED"
+        for entry in support_file_entries
+    )
 
     report_lines = [
-        "REHOST TRANSFORMATION APPLICATION REPORT",
+        "REHOST TRANSFORMATION EXTRACTION REPORT",
         "=" * 40,
         "",
         "SUMMARY",
         "-------",
-        (f"Files containing transformations: {transformed_file_count}"),
-        (f"Transformations loaded: {transformation_count}"),
-        (f"Transformations applied: {applied_count}"),
-        (f"Transformations already applied: {already_applied_count}"),
-        (f"Transformations skipped: {skipped_count}"),
-        (f"Support files loaded: {len(support_file_results)}"),
-        (f"Support files created: {created_support_file_count}"),
-        (f"Support files skipped: {skipped_support_file_count}"),
-        (f"Parser warnings: {warning_count}"),
-        ""
+        f"Target conditional blocks detected: {detected_block_count}",
+        f"Created transformations: {created_count}",
+        f"Skipped blocks: {skipped_count}",
+        f"Support files stored in JSON: {stored_support_file_count}",
+        f"Support files skipped: {skipped_support_file_count}",
+        f"Warnings: {len(parser_warnings)}",
+        "",
+        "TRANSFORMATIONS",
+        "---------------",
     ]
 
-    if not application_results:
+    if report_entries:
+        for entry in report_entries:
+            report_lines.extend(
+                [
+                    f"[{entry['result']}]",
+                    f"File: {entry['file']}",
+                    f"Scope: {entry['scope']}",
+                ]
+            )
+
+            if entry["transformation_id"] is not None:
+                report_lines.append(
+                    f"Transformation: {entry['transformation_id']}"
+                )
+
+            if entry["function_name"] is not None:
+                report_lines.append(
+                    f"Function: {entry['function_name']}"
+                )
+
+            matched_directive = entry.get(
+                "matched_branch_directive"
+            )
+
+            if matched_directive is not None:
+                matched_condition = entry.get(
+                    "matched_branch_condition"
+                )
+
+                if matched_condition is None:
+                    branch_description = f"#{matched_directive}"
+                else:
+                    branch_description = (
+                        f"#{matched_directive} "
+                        f"{matched_condition}"
+                    )
+
+                report_lines.append(f"Matched branch: {branch_description}")
+
+            report_lines.append(f"Operation: {entry['operation']}")
+
+            if entry["operation"] == "insert":
+                report_lines.append(f"Position: {entry['position']}")
+
+                if entry["anchor"] is not None:
+                    report_lines.extend(["Anchor:", indent_text(entry["anchor"]),])
+
+                if entry["fallback_anchor"] is not None:
+                    report_lines.extend(
+                        [
+                            (
+                                "Fallback position: "
+                                f"{entry['fallback_position']}"
+                            ),
+                            "Fallback anchor:",
+                            indent_text(
+                                entry["fallback_anchor"]
+                            ),
+                        ]
+                    )
+
+            report_lines.append(f"Reason: {entry['reason']}")
+
+            if entry["operation"] == "replace":
+                report_lines.extend(["Matched original branch:", indent_text(entry["match_text"]),])
+
+            report_lines.append("")
+    else:
         report_lines.extend(
             [
-                "No transformations were available.",
-                ""
-            ]
-        )
-
-
-    report_lines.extend(
-        [
-            "SUPPORT FILE RESULTS",
-            "--------------------",
-            "",
-        ]
-    )
-
-    if not support_file_results:
-        report_lines.extend(["No support files were available.","",])
-
-    for support_result in support_file_results:
-        report_lines.extend(
-            [
-                f"[{support_result['result']}]",
-                f"File: {support_result['file']}",
-                f"Reason: {support_result['reason']}",
+                "None",
                 "",
             ]
         )
 
     report_lines.extend(
         [
-            "TRANSFORMATION RESULTS",
-            "----------------------",
-            "",
+            "SUPPORT FILES",
+            "-------------",
         ]
     )
 
-
-    for result in application_results:
+    if support_file_entries:
+        for entry in support_file_entries:
+            report_lines.extend(
+                [
+                    f"[{entry['result']}]",
+                    f"File: {entry['file']}",
+                    f"Reason: {entry['reason']}",
+                    "",
+                ]
+            )
+    else:
         report_lines.extend(
             [
-                f"[{result['result']}]",
-                (f"Transformation: {result['transformation_id']}"),
-                f"File: {result['file']}",
-                f"Scope: {result['scope']}"
+                "None",
+                "",
             ]
         )
 
-        function_name = result.get("function_name")
+    report_lines.extend(
+        [
+            "WARNINGS",
+            "--------",
+        ]
+    )
 
-        if function_name is not None:
-            report_lines.append(f"Function: {function_name}")
+    if parser_warnings:
+        for warning in parser_warnings:
+            report_lines.append(f"- {warning}")
+    else:
+        report_lines.append("None")
 
-        reason = result.get("reason")
-        if reason:
-            report_lines.append(f"Reason: {reason}")
+    report_lines.append("")
 
-        if result["result"] == "APPLIED":
-            report_lines.append(f"Applied occurrence count: {result.get('applied_count', 0)}")
+    output_file.write_text("\n".join(report_lines), encoding="utf-8",)
 
-            applied_ranges = result.get("ranges", [])
+def parse_arguments() -> argparse.Namespace:
+    # Read optional command-line settings.
+    parser = argparse.ArgumentParser(description=("Extract verified conditional compilation transformations from old original and rehost files."))
 
-            for range_number, character_range in enumerate(applied_ranges, start=1):
-                report_lines.append(
-                    "Original character range "
-                    f"{range_number}: "
-                    f"{character_range['start']}:"
-                    f"{character_range['end']}"
-                )
+    parser.add_argument(
+        "--target-macros",
+        nargs="+",
+        required=True,
+        metavar="MACRO",
+        help=(
+            "Target conditional-compilation macros to extract. Write all with spaces between. Don't use comma or anything else."
+            "Example: --target-macros REHOST_MODE REHOST_BUILD PRINT_TEST"
+        ),
+    )
+        
+    return parser.parse_args()
 
-            report_lines.append("")
-
-        else:
-            expected_match = str(result.get("expected_match", ""))
-
-            report_lines.extend(
-                [
-                    "Expected code:",
-                    indent_text(expected_match), 
-                    ""
-                ]
-            )
-
-        parser_warnings = result.get("parser_warnings", [])
-        if parser_warnings:
-            report_lines.append("Parser warnings:")
-
-            for warning in parser_warnings:
-                report_lines.append(f"    - {warning}")
-            report_lines.append("")
-
-
-    output_file.write_text("\n".join(report_lines), encoding="utf-8")
-
-
-def read_source_with_encoding(file_path: Path) -> Tuple[str, str]:
-    try:
-        return (file_path.read_text(encoding="utf-8"),"utf-8")
-
-    except UnicodeDecodeError:
-        print(f"{file_path}: utf-8 olarak okunamadı, cp1254 denendi.")
-        return (file_path.read_text(encoding="cp1254"), "cp1254")
 
 
 def main() -> None:
-    transformations, support_files = load_transformations(TRANSFORMATIONS_FILE)
+    arguments = parse_arguments()
 
-    prepare_generated_project(source_directory=NEW_ORIGINAL_DIR, output_directory=GENERATED_REHOST_DIR)
+    target_macros = set(arguments.target_macros)
 
-    support_file_results = apply_support_files_to_project(output_directory=GENERATED_REHOST_DIR, support_files=support_files)
-    
-    application_results = (apply_transformations_to_project(output_directory=(GENERATED_REHOST_DIR), transformations=transformations))
+    original_source_files = find_project_files(ORIGINAL_DIR, PARSED_SOURCE_EXTENSIONS,)
+    rehost_source_files = find_project_files(REHOST_DIR, PARSED_SOURCE_EXTENSIONS,)
 
-    grouped_transformations = (group_transformations_by_file(transformations))
+    original_tracked_files = find_project_files(ORIGINAL_DIR, TRACKED_FILE_EXTENSIONS,)
+    rehost_tracked_files = find_project_files(REHOST_DIR, TRACKED_FILE_EXTENSIONS,)
 
-    save_application_report(
-        application_results=application_results,
-        support_file_results=support_file_results,
-        transformation_count=len(transformations),
-        transformed_file_count=len(grouped_transformations),
-        output_file=APPLICATION_REPORT_FILE
+    original_source_paths = set(original_source_files)
+    rehost_source_paths = set(rehost_source_files)
+
+    common_relative_paths = sorted(original_source_paths & rehost_source_paths)
+    original_only_paths = sorted(original_source_paths - rehost_source_paths)
+
+    original_tracked_paths = set(original_tracked_files)
+    rehost_tracked_paths = set(rehost_tracked_files)
+
+    rehost_only_paths = sorted(rehost_tracked_paths - original_tracked_paths)
+
+    all_transformations = []
+    all_report_entries = []
+    all_support_files = []
+    all_support_file_entries = []
+    all_warnings = []
+
+    detected_block_count = 0
+    next_transformation_number = 1
+
+    # Files must exist at the same relative path in both directories.
+    for relative_file_path in common_relative_paths:
+        original_file = original_source_files[relative_file_path]
+        rehost_file = rehost_source_files[relative_file_path]
+
+        try:
+            original_source = read_source_file(original_file)
+
+            rehost_source = read_source_file(rehost_file)
+
+            original_parse_result = parse_source(original_source, target_macros=target_macros,)
+
+            rehost_parse_result = parse_source(rehost_source, target_macros=target_macros,)
+
+            file_transformations, file_report_entries = extract_transformations(
+                original_source=original_source,
+                rehost_source=rehost_source,
+                original_parse_result=original_parse_result,
+                rehost_parse_result=rehost_parse_result,
+                relative_file_path=relative_file_path,
+                starting_transformation_number=next_transformation_number
+            )
+
+            all_transformations.extend(file_transformations)
+            all_report_entries.extend(file_report_entries)
+
+            next_transformation_number += len(file_transformations)
+
+            detected_block_count += sum(
+                block["is_target"]
+                for block in rehost_parse_result["conditional_blocks"]
+            )
+
+            all_warnings.extend(
+                f"{relative_file_path} (original): {warning}"
+                for warning in original_parse_result["warnings"]
+            )
+
+            all_warnings.extend(
+                f"{relative_file_path} (rehost): {warning}"
+                for warning in rehost_parse_result["warnings"]
+            )
+
+        except (OSError, UnicodeError, ValueError) as error:
+            print(
+                f"  ERROR while processing {relative_file_path}: {error}",
+                flush=True
+            )
+            all_warnings.append(f"{relative_file_path}: "
+                f"The file pair could not be processed: {error}"
+            )
+            continue
+
+    # An original-only file has no old rehost version to learn from.
+    for relative_file_path in original_only_paths:
+        all_warnings.append(f"{relative_file_path}: The file exists only in original and was skipped.")
+
+    # Rehost-only files are complete support files rather than conditional transformations. Store their content in the JSON.
+    (all_support_files, all_support_file_entries, support_file_warnings) = build_support_files(rehost_only_paths, rehost_tracked_files)
+
+    all_warnings.extend(support_file_warnings)
+
+    save_transformations_json(
+        transformations=all_transformations,
+        support_files=all_support_files,
+        output_file=TRANSFORMATIONS_FILE
     )
 
-    print(f"\nGenerated project written to: {GENERATED_REHOST_DIR}")
-    print(f"Application report written to: {APPLICATION_REPORT_FILE}")
+    save_extraction_report(
+        report_entries=all_report_entries,
+        support_file_entries=(all_support_file_entries),
+        parser_warnings=all_warnings,
+        detected_block_count=(detected_block_count),
+        output_file=(EXTRACTION_REPORT_FILE)
+    )
+    
+    print("\nTransformations written to: " f"{TRANSFORMATIONS_FILE}")
+    print("Support files stored in JSON: " f"{len(all_support_files)}")
+    print("Extraction report written to: " f"{EXTRACTION_REPORT_FILE}")
 
 
 if __name__ == "__main__":
