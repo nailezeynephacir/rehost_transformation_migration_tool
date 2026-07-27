@@ -3,6 +3,9 @@ import json
 import shutil
 from typing import Any, Dict, List, Optional, Tuple
 
+import os
+import tempfile
+
 from parser import parse_source
 from transformation_matching import build_non_function_regions, find_matches_in_regions, find_matching_function
 
@@ -209,8 +212,12 @@ def apply_insertion_transformation(source_text: str, transformation: Dict[str, A
                 "result": "APPLIED",
                 "reason": (f"The insertion was applied at the {position} position."),
                 "applied_count": 1,
-                "start": inserted_start,
-                "end": inserted_end,
+                "ranges": [
+                    {
+                        "start": inserted_start,
+                        "end": inserted_end,
+                    }
+                ],
             }
         )
         return updated_source, result
@@ -269,6 +276,7 @@ def apply_insertion_transformation(source_text: str, transformation: Dict[str, A
     anchor_match = anchor_matches[0]
 
     if used_position == "before":
+        anchor_match = include_leading_indentation(source_text, anchor_match,)
         insertion_index = anchor_match["start"]
     else:
         insertion_index = anchor_match["end"]
@@ -317,8 +325,6 @@ def get_transformation_function_name(transformation: Dict[str, Any]) -> Optional
     return function_name
 
 
-## ----- This were added for occurence > 1, still do it case -----
-
 def match_is_inside_replacement(match: Dict[str, Any], replacement_matches: List[Dict[str, Any]]) -> bool:
     # An original-code match may be located inside an already-applied conditional replacement. 
     # Ignore it to prevent nested conditionals.
@@ -335,6 +341,26 @@ def matches_overlap(matches: List[Dict[str, Any]]) -> bool:
 
     return False
 
+def include_leading_indentation(source_text: str, match: Dict[str, Any],) -> Dict[str, Any]:
+    # Include indentation before a match when it is the first meaningful content on its line.
+    match_start = match["start"]
+
+    newline_start = source_text.rfind("\n", 0, match_start)
+    carriage_return_start = source_text.rfind("\r", 0, match_start)
+
+    line_start = max(newline_start, carriage_return_start,) + 1
+
+    leading_text = source_text[line_start:match_start]
+
+    if leading_text.strip():
+        return match
+
+    return {
+        **match,
+        "start": line_start,
+        "matched_text": source_text[line_start:match["end"]],
+    }
+
 
 def apply_replacement_to_matches(source_text: str, matches: List[Dict[str, Any]], replacement: str) -> str:
     # Apply replacements from right to left.
@@ -345,7 +371,8 @@ def apply_replacement_to_matches(source_text: str, matches: List[Dict[str, Any]]
         updated_source = (updated_source[:match["start"]] + replacement + updated_source[match["end"]:])
 
     return updated_source
-## ----------------------------------------------------------------
+
+
 
 def apply_single_transformation(source_text: str,transformation: Dict[str, Any]) -> Tuple[str, Dict[str, Any]]:
     # Apply one transformation only when exactly one safe match exists.
@@ -431,7 +458,7 @@ def apply_single_transformation(source_text: str,transformation: Dict[str, Any])
                     "reason": ("No untransformed matches remain in the required scope. "
                          f"The complete replacement is already present {len(replacement_matches)} time(s)."
                     ),
-                    "match_count": 1,
+                    "match_count": 0,
                     "applied_count": 0,
                         "ranges": [
                             {
@@ -447,6 +474,12 @@ def apply_single_transformation(source_text: str,transformation: Dict[str, Any])
             result["reason"] = ("The expected code was not found in the required scope.")
 
         return source_text, result
+        
+    # Include the indentation at the beginning of matched lines.
+    matches_to_apply = [
+        include_leading_indentation(source_text, match)
+        for match in matches_to_apply
+    ]
 
     # Multiple automatic replacements are currently allowed only
     # inside one verified function.
@@ -485,6 +518,14 @@ def apply_single_transformation(source_text: str,transformation: Dict[str, Any])
     return updated_source, result
 
 
+def require_non_empty_string(value: Any, field_name: str, transformation_index: int,) -> str:
+    # Validate required textual transformation fields.
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"Transformation {transformation_index} must contain a non-empty string {field_name}.")
+
+    return value
+
+
 def load_transformations(transformations_file: Path) -> Tuple[List[Dict[str, Any]], List[Dict[str, str]]]:
     # Read and perform basic validation on the transformation JSON.
     if not transformations_file.exists():
@@ -510,6 +551,12 @@ def load_transformations(transformations_file: Path) -> Tuple[List[Dict[str, Any
 
         operation = transformation.get("operation", "replace")
 
+        if not isinstance(operation, str):
+            raise ValueError(f"Transformation {index} must contain a string operation.")
+
+        if operation not in {"replace", "insert"}:
+            raise ValueError(f"Transformation {index} contains an unsupported operation: {operation}")
+        
         # These fields are required for every transformation type.
         required_fields = {"id", "file", "scope",}
 
@@ -526,15 +573,62 @@ def load_transformations(transformations_file: Path) -> Tuple[List[Dict[str, Any
 
         if missing_fields:
             missing_text = ", ".join(sorted(missing_fields))
-
             raise ValueError(f"Transformation {index} is missing required fields: {missing_text}")
 
-        # Anchor-based insertions also require an anchor.
-        if (operation == "insert" and transformation.get("position") in {"before", "after",} and "anchor" not in transformation):
-            raise ValueError(f"Transformation {index} is an anchor-based insertion but does not contain an anchor.")
+        # Validate fields shared by every transformation.
+        require_non_empty_string(transformation.get("id"), "id",index,)
+        require_non_empty_string(transformation.get("file"), "file",index,)
+
+        scope = require_non_empty_string(transformation.get("scope"), "scope",index,)
+
+        if scope not in {"function", "include", "global"}:
+            raise ValueError(f"Transformation {index} contains an unsupported scope: {scope}")
+
+        # Function information is required for function-scope transformations.
+        if scope == "function":
+            function_information = transformation.get("function")
+
+            if not isinstance(function_information, dict):
+                raise ValueError(f"Transformation {index} uses function scope but does not contain a valid function object.")
+
+            require_non_empty_string(function_information.get("name"), "function.name",index,)
+            require_non_empty_string(function_information.get("signature"), "function.signature", index,)
+
+        if operation == "replace":
+            require_non_empty_string(transformation.get("match"),"match",index,)
+            require_non_empty_string(transformation.get("replacement"),"replacement",index,)
+
+            continue
+
+        # Validate insertion-specific fields.
+        position = require_non_empty_string(transformation.get("position"),"position",index,)
+
+        if position not in {"before","after","function_start","function_end",}:
+            raise ValueError(f"Transformation {index} contains an unsupported insertion position: {position}")
+
+        require_non_empty_string(transformation.get("content"),"content",index,)
+
+        if position in {"function_start", "function_end"}:
+            if scope != "function":
+                raise ValueError(f"Transformation {index} uses the {position} position, which requires function scope.")
+
+        if position in {"before", "after"}:
+            require_non_empty_string(transformation.get("anchor"),"anchor",index,)
+
+        fallback_position = transformation.get("fallback_position")
+        fallback_anchor = transformation.get("fallback_anchor")
+
+        # Fallback position and anchor must either both exist or both be absent.
+        if (fallback_position is None) != (fallback_anchor is None):
+            raise ValueError(f"Transformation {index} must contain both fallback_position and fallback_anchor.")
+
+        if fallback_position is not None:
+            if fallback_position not in {"before", "after"}:
+                raise ValueError(f"Transformation {index} contains an unsupported fallback position: {fallback_position}")
+
+            require_non_empty_string(fallback_anchor,"fallback_anchor",index,)
         
-    # support_files is optional so older transformation JSON files
-    # containing only transformations remain valid.
+    # support_files is optional so older transformation JSON files containing only transformations remain valid.
     support_files = transformation_data.get("support_files", [])
 
     if not isinstance(support_files, list):
@@ -576,10 +670,7 @@ def load_transformations(transformations_file: Path) -> Tuple[List[Dict[str, Any
 
 def normalize_relative_file_path(file_path: str) -> str:
     # Use one consistent separator when comparing JSON file paths.
-    return file_path.replace(
-        "\\",
-        "/"
-    )
+    return file_path.replace("\\", "/")
 
 
 def group_transformations_by_file(transformations: List[Dict[str, Any]]) -> Dict[str, List[Dict[str, Any]]]:
@@ -606,7 +697,6 @@ def resolve_project_file(project_directory: Path, relative_file_path: str) -> Tu
         return (None, "The transformation file path leaves the project directory.")
 
     project_directory_resolved = (project_directory.resolve())
-
     resolved_file = (project_directory / relative_path).resolve()
 
     try:
@@ -714,6 +804,54 @@ def build_file_skip_result(transformation: Dict[str, Any],reason: str) -> Dict[s
     }
 
 
+def write_source_atomically(output_file: Path, source_text: str, source_encoding: str,) -> None:
+    # Encode completely before opening or modifying any file.
+    encoded_source = source_text.encode(source_encoding)
+    temporary_path = None
+
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="wb",
+            dir=output_file.parent,
+            prefix=f".{output_file.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as temporary_file:
+            temporary_path = Path(temporary_file.name)
+
+            temporary_file.write(encoded_source)
+            temporary_file.flush()
+            os.fsync(temporary_file.fileno())
+
+        # Replace the destination only after the temporary file has been written successfully.
+        os.replace(temporary_path, output_file)
+
+    except Exception:
+        if temporary_path is not None:
+            try:
+                temporary_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+        raise
+
+
+def mark_unwritten_results_as_skipped(file_results: List[Dict[str, Any]], reason: str,) -> None:
+    # Results calculated from an in-memory source are not considered successful when the final file cannot be written.
+    for result in file_results:
+        if result.get("result") not in {"APPLIED", "ALREADY_APPLIED",}:
+            continue
+
+        result.update(
+            {
+                "result": "SKIPPED",
+                "reason": reason,
+                "applied_count": 0,
+                "ranges": [],
+            }
+        )
+
+
 def apply_transformations_to_project(output_directory: Path,transformations: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     # Apply transformations to their corresponding files inside the generated project.
     grouped_transformations = (group_transformations_by_file(transformations))
@@ -752,8 +890,28 @@ def apply_transformations_to_project(output_directory: Path,transformations: Lis
             continue
 
 
-        updated_source, file_results = (apply_transformations_to_source(source_text, file_transformations))
-        output_file.write_text(updated_source,encoding=source_encoding)
+        updated_source, file_results = (apply_transformations_to_source(source_text, file_transformations,))
+
+        # Do not rewrite a file when no transformation changed its content.
+        if updated_source == source_text:
+            application_results.extend(file_results)
+            continue
+
+        try:
+            write_source_atomically(output_file, updated_source, source_encoding,)
+
+        except UnicodeEncodeError as error:
+            reason = (
+                f"The transformed source could not be encoded as {source_encoding}. No changes were written: {error}")
+
+            mark_unwritten_results_as_skipped(file_results, reason,)
+
+        except OSError as error:
+            reason = (
+                f"The transformed source could not be written safely. No changes were written: {error}")
+
+            mark_unwritten_results_as_skipped(file_results, reason,)
+
         application_results.extend(file_results)
 
     return application_results
