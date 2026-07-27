@@ -5,33 +5,96 @@ from parser import mask_comments,normalize_function_signature
 # Aramayı boşluksuz ve yorumsuz kod üzerinde yaparız (normalize_code_text). 
 # Değişikliği ise pozisyon haritası sayesinde gerçek kaynak kod üzerinde yaparız. (normalize_code_with_positions)
 
-def normalize_code_text(text: str) -> str:
-    # Ignore comments and whitespace differences while comparing code.
-    # Strings and character literals are preserved because their contents may affect program behavior.
-    text_without_comments = mask_comments(text)
+def is_identifier_character(character: str) -> bool:
+    # C/C++ identifiers may contain letters, digits, and underscores.
+    return character == "_" or character.isalnum()
 
-    return "".join(text_without_comments.split())
+
+def normalize_code_text(text: str) -> str:
+    # Ignore comments and insignificant whitespace while preserving identifier boundaries and literal contents.
+    normalized_text, _ = normalize_code_with_positions(text)
+
+    return normalized_text
 
 
 def normalize_code_with_positions(text: str) -> Tuple[str, List[int]]:
     # Normalize source code while keeping a mapping back to the original character positions.
-    # Comments and whitespace are ignored during comparison.
-    # Strings and character literals are preserved.
+    # Whitespace between identifiers is represented by a single space so separate tokens such as "int x" cannot become "intx".
+    # Whitespace inside string and character literals is preserved.
     masked_text = mask_comments(text)
 
     normalized_characters = []
     original_positions = []
 
-    for index, character in enumerate(masked_text):
-        if character.isspace():
+    state = "NORMAL"
+    pending_whitespace = False
+    index = 0
+
+    while index < len(masked_text):
+        character = masked_text[index]
+
+        if state == "NORMAL":
+            if character.isspace():
+                pending_whitespace = True
+                index += 1
+                continue
+
+            if (pending_whitespace
+                and normalized_characters
+                and is_identifier_character(normalized_characters[-1])
+                and is_identifier_character(character)
+            ):
+                normalized_characters.append(" ")
+                original_positions.append(index)
+
+            pending_whitespace = False
+
+            normalized_characters.append(character)
+            original_positions.append(index)
+
+            if character == '"':
+                state = "STRING"
+            elif character == "'":
+                state = "CHAR"
+
+            index += 1
             continue
 
+        # Preserve everything inside string and character literals, including whitespace.
         normalized_characters.append(character)
-
         original_positions.append(index)
 
-    return ("".join(normalized_characters), original_positions)
+        if character == "\\" and index + 1 < len(masked_text):
+            index += 1
+            normalized_characters.append(masked_text[index])
+            original_positions.append(index)
 
+        elif (state == "STRING" and character == '"'):
+            state = "NORMAL"
+
+        elif (state == "CHAR" and character == "'"):
+            state = "NORMAL"
+
+        index += 1
+
+    return "".join(normalized_characters), original_positions
+
+
+def has_identifier_boundaries(normalized_source: str, normalized_target: str, match_start: int,) -> bool:
+    # Prevent an identifier from matching inside a longer identifier.
+    match_end = match_start + len(normalized_target)
+
+    if (is_identifier_character(normalized_target[0])
+        and match_start > 0
+        and is_identifier_character(normalized_source[match_start - 1])):
+        return False
+
+    if (is_identifier_character(normalized_target[-1])
+        and match_end < len(normalized_source)
+        and is_identifier_character(normalized_source[match_end])):
+        return False
+
+    return True
 
 def find_normalized_matches(source_text: str, target_text: str) -> List[Dict[str, Any]]:
     # Find every normalized occurrence of target_text in source_text.
@@ -47,15 +110,19 @@ def find_normalized_matches(source_text: str, target_text: str) -> List[Dict[str
     search_start = 0
 
     while True:
-        normalized_start = normalized_source.find(normalized_target, search_start)
+        normalized_start = normalized_source.find(normalized_target, search_start,)
 
         if normalized_start == -1:
             break
 
-        normalized_end = (normalized_start + len(normalized_target))
+        if not has_identifier_boundaries(normalized_source, normalized_target, normalized_start,):
+            search_start = normalized_start + 1
+            continue
+
+        normalized_end = normalized_start + len(normalized_target)
 
         source_start = source_positions[normalized_start]
-        source_end = (source_positions[normalized_end - 1] + 1)
+        source_end = source_positions[normalized_end - 1] + 1
 
         matches.append(
             {
@@ -167,11 +234,9 @@ def build_non_function_regions(source_text: str, functions: List[Dict[str, Any]]
     return regions
 
 
-def count_normalized_occurrences(regions: List[Dict[str, Any]], target_text: str) -> int:
-    # Count normalized occurrences across independent search regions.
-    normalized_target = normalize_code_text(target_text)
-
-    if not normalized_target:
-        return 0
-
-    return sum(normalize_code_text(region["text"]).count(normalized_target) for region in regions)
+def count_normalized_occurrences(regions: List[Dict[str, Any]], target_text: str,) -> int:
+    # Use the same boundary-aware matching logic as the application stage.
+    return sum(
+        len(find_normalized_matches(region["text"], target_text))
+        for region in regions
+    )
