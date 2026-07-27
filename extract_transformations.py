@@ -34,6 +34,12 @@ SUPPORT_FILE_EXTENSIONS = {
     ".bat",
     ".cmd",
     ".ps1",
+    "json",
+    ".yaml",
+    ".toml"
+    ".cmake", 
+    "CMakeLists.txt",
+    "Makefile",  
 }
 
 TRACKED_FILE_EXTENSIONS = (PARSED_SOURCE_EXTENSIONS | SUPPORT_FILE_EXTENSIONS)
@@ -219,8 +225,7 @@ def select_matching_original_branch(block: Dict[str, Any], search_regions: List[
             branch_description = f"#{directive} {condition}"
 
         result_details.append(
-            f"{result['occurrence_count']} match(es)"
-        )
+            f"{branch_description}: {result['occurrence_count']} match(es)")
 
     result_details_text = ", ".join(result_details)
 
@@ -307,6 +312,10 @@ def find_unique_following_anchor(block: Dict[str, Any], rehost_source: str, reho
 
         meaningful_line_count += 1
         candidate_text = "".join(candidate_lines).strip()
+
+        if contains_unstable_preprocessor_directive(candidate_text):
+            return None
+        
         occurrence_count = count_normalized_occurrences(original_search_regions, candidate_text)
 
         if occurrence_count == 1:
@@ -352,6 +361,11 @@ def find_unique_preceding_anchor(block: Dict[str, Any], rehost_source: str, reho
 
         meaningful_line_count += 1
         candidate_text = "".join(candidate_lines).strip()
+
+        # Do not use conditional or macro directives as function-scope anchors.
+        if contains_unstable_preprocessor_directive(candidate_text):
+            return None
+
         occurrence_count = count_normalized_occurrences(original_search_regions, candidate_text)
 
         if occurrence_count == 1:
