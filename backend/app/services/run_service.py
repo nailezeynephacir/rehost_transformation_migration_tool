@@ -1,6 +1,7 @@
 import json
+import shutil
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -142,3 +143,40 @@ def get_artifact_path(run_id: str, artifact_name: str) -> Path:
         raise ArtifactNotFoundError(run_id, artifact_name)
 
     return resolved_path
+
+
+def cleanup_expired_runs() -> int:
+    # Deletes any run folder whose own recorded created_at is older than
+    # RUN_RETENTION_HOURS. Uses each run's own timestamp (not folder mtime),
+    # since that's the value this service already treats as the source of
+    # truth for a run's identity elsewhere.
+    if not settings.RUNS_DIR.exists():
+        return 0
+
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=settings.RUN_RETENTION_HOURS)
+    deleted_count = 0
+
+    for run_dir in settings.RUNS_DIR.iterdir():
+        if not run_dir.is_dir():
+            continue
+
+        state_file = run_dir / "run.json"
+        if not state_file.exists():
+            # No run.json means this isn't a run this service created -
+            # not our data to delete, leave it alone rather than guess.
+            continue
+
+        try:
+            state = json.loads(state_file.read_text())
+            created_at = datetime.fromisoformat(state["created_at"])
+        except (json.JSONDecodeError, KeyError, ValueError):
+            # A run folder we can't make sense of isn't safe to silently
+            # delete either - skip it and let a human notice, rather than
+            # destroying something that might matter.
+            continue
+
+        if created_at < cutoff:
+            shutil.rmtree(run_dir, ignore_errors=True)
+            deleted_count += 1
+
+    return deleted_count

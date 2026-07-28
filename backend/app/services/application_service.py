@@ -1,6 +1,6 @@
 import asyncio
 import logging
-import zipfile
+import shutil
 from pathlib import Path
 
 from fastapi import UploadFile
@@ -8,9 +8,9 @@ from fastapi import UploadFile
 from app.core.exceptions import AppError, InvalidUploadError
 from app.engine.application import apply_transformations
 from app.services import run_service
+from app.services.archive_service import safe_extract_zip, validate_upload_size
 
 logger = logging.getLogger(__name__)
-
 
 
 async def start_application(new_original: UploadFile, transformations: UploadFile) -> str:
@@ -23,35 +23,20 @@ async def start_application(new_original: UploadFile, transformations: UploadFil
     run_id = run_service.create_run(operation="apply")
     run_dir = run_service.get_run_dir(run_id)
 
-    (run_dir / "new_original.zip").write_bytes(await new_original.read())
-    (run_dir / "rehost_transformations.json").write_bytes(await transformations.read())
+    new_original_bytes = await new_original.read()
+    validate_upload_size(new_original_bytes, new_original.filename)
+    (run_dir / "new_original.zip").write_bytes(new_original_bytes)
+
+    # Not a zip, so no extraction-related risk, but still worth checking
+    # against the same upload-size limit - nothing stops someone uploading
+    # an arbitrarily large JSON file otherwise.
+    transformations_bytes = await transformations.read()
+    validate_upload_size(transformations_bytes, transformations.filename)
+    (run_dir / "rehost_transformations.json").write_bytes(transformations_bytes)
 
     asyncio.create_task(_process_application(run_id, run_dir))
 
     return run_id
-
-
-def _safe_extract_zip(zip_path: Path, destination: Path) -> None:
-    # These are user-uploaded archives, so treat every member path as
-    # untrusted: reject anything that would resolve outside `destination`
-    # before extracting it (zip-slip), the same defense-in-depth pattern
-    # used by run_service.get_artifact_path for downloads.
-    destination.mkdir(parents=True, exist_ok=True)
-    destination_resolved = destination.resolve()
-
-    with zipfile.ZipFile(zip_path) as archive:
-        for member in archive.infolist():
-            member_path = (destination / member.filename).resolve()
-
-            try:
-                member_path.relative_to(destination_resolved)
-            except ValueError:
-                raise InvalidUploadError(
-                    f"The archive '{zip_path.name}' contains an entry that "
-                    f"escapes its extraction directory: {member.filename}"
-                )
-
-        archive.extractall(destination)
 
 
 async def _process_application(run_id: str, run_dir) -> None:
@@ -59,7 +44,7 @@ async def _process_application(run_id: str, run_dir) -> None:
 
     try:
         new_original_dir = run_dir / "new_original"
-        _safe_extract_zip(run_dir / "new_original.zip", new_original_dir)
+        safe_extract_zip(run_dir / "new_original.zip", new_original_dir)
 
         output_dir = run_dir / "generated_rehost"
 
@@ -93,12 +78,19 @@ async def _process_application(run_id: str, run_dir) -> None:
             "already_applied": engine_result.summary.already_applied,
         }
 
+        # Bundle the whole generated project into one zip too, in addition
+        # to the individual per-file artifacts below - individual files for
+        # grabbing one thing quickly, the zip for actually taking the whole
+        # result to build with. shutil.make_archive appends ".zip" itself.
+        shutil.make_archive(str(run_dir / "generated_rehost"), "zip", root_dir=str(output_dir))
+
         # Each generated file becomes its own artifact, listed with its
         # relative path as the name - this is the schema doc's answer to
         # the "third pane" gap, reusing the same list-then-fetch mechanism
         # rather than a separate endpoint.
         artifacts = [
             {"name": "application_report.txt", "type": "application_report"},
+            {"name": "generated_rehost.zip", "type": "generated_project_zip"},
         ] + [
             {"name": f"generated_rehost/{relative_path}", "type": "generated_file"}
             for relative_path in engine_result.generated_files

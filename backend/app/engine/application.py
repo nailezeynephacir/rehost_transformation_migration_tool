@@ -517,16 +517,14 @@ def apply_single_transformation(source_text: str, transformation: Dict[str, Any]
         for match in matches_to_apply
     ]
 
-    # Deliberate carve-out, left exactly as the sibling team wrote it: outside
-    # function scope, 2+ matches means skip as ambiguous, but *inside*
-    # function scope every match gets replaced instead. This contradicts the
-    # naming of the sibling team's own 06_skipped_multiple_matches fixture -
-    # it looks like it should have been "skip everywhere", but changing it
-    # either direction is a product decision for the sibling team to make
-    # explicitly, not something to silently pick during this conversion.
-    # OPEN QUESTION - do not resolve without the sibling team's sign-off.
-    if (len(matches_to_apply) > 1 and transformation.get("scope") != "function"):
-        result["reason"] = ("The expected code was found more than once outside function scope. The match is ambiguous.")
+    # Sibling team decision (2026-07-28), resolving the prior OPEN QUESTION:
+    # multiple untransformed matches are ambiguous in every scope, including
+    # function scope - matches the naming/intent of the sibling team's own
+    # 06_skipped_multiple_matches fixture, and the "exactly one safe match"
+    # principle apply_single_transformation() is built around. This mirrors
+    # the same removed exception on the extraction side.
+    if len(matches_to_apply) > 1:
+        result["reason"] = ("The expected code was found more than once in the required scope. The match is ambiguous.")
         return source_text, result
 
     if matches_overlap(matches_to_apply):

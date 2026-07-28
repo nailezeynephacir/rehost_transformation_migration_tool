@@ -1,6 +1,5 @@
 import asyncio
 import logging
-import zipfile
 from pathlib import Path
 from typing import List
 
@@ -9,6 +8,7 @@ from fastapi import UploadFile
 from app.core.exceptions import AppError, InvalidUploadError
 from app.engine.extraction import extract_transformations
 from app.services import run_service
+from app.services.archive_service import safe_extract_zip, validate_upload_size
 
 logger = logging.getLogger(__name__)
 
@@ -25,9 +25,17 @@ async def start_extraction(original: UploadFile, rehost: UploadFile, target_macr
     run_dir = run_service.get_run_dir(run_id)
 
     # Real upload bytes are actually saved - this part isn't mocked, since
-    # it's the part the engine conversion doesn't change at all.
-    (run_dir / "original.zip").write_bytes(await original.read())
-    (run_dir / "rehost.zip").write_bytes(await rehost.read())
+    # it's the part the engine conversion doesn't change at all. Size is
+    # validated against the compressed upload here, before anything is
+    # written; safe_extract_zip validates the *extracted* size separately
+    # once the file is actually opened as a zip.
+    original_bytes = await original.read()
+    validate_upload_size(original_bytes, original.filename)
+    (run_dir / "original.zip").write_bytes(original_bytes)
+
+    rehost_bytes = await rehost.read()
+    validate_upload_size(rehost_bytes, rehost.filename)
+    (run_dir / "rehost.zip").write_bytes(rehost_bytes)
 
     # Fire-and-forget: the request returns immediately with run_id, this
     # keeps running independently. asyncio.create_task rather than
@@ -39,29 +47,6 @@ async def start_extraction(original: UploadFile, rehost: UploadFile, target_macr
     return run_id
 
 
-def _safe_extract_zip(zip_path: Path, destination: Path) -> None:
-    # These are user-uploaded archives, so treat every member path as
-    # untrusted: reject anything that would resolve outside `destination`
-    # before extracting it (zip-slip), the same defense-in-depth pattern
-    # used by run_service.get_artifact_path for downloads.
-    destination.mkdir(parents=True, exist_ok=True)
-    destination_resolved = destination.resolve()
-
-    with zipfile.ZipFile(zip_path) as archive:
-        for member in archive.infolist():
-            member_path = (destination / member.filename).resolve()
-
-            try:
-                member_path.relative_to(destination_resolved)
-            except ValueError:
-                raise InvalidUploadError(
-                    f"The archive '{zip_path.name}' contains an entry that "
-                    f"escapes its extraction directory: {member.filename}"
-                )
-
-        archive.extractall(destination)
-
-
 async def _process_extraction(run_id: str, run_dir, target_macros: List[str]) -> None:
     run_service.mark_running(run_id)
 
@@ -69,8 +54,8 @@ async def _process_extraction(run_id: str, run_dir, target_macros: List[str]) ->
         original_dir = run_dir / "original"
         rehost_dir = run_dir / "rehost"
 
-        _safe_extract_zip(run_dir / "original.zip", original_dir)
-        _safe_extract_zip(run_dir / "rehost.zip", rehost_dir)
+        safe_extract_zip(run_dir / "original.zip", original_dir)
+        safe_extract_zip(run_dir / "rehost.zip", rehost_dir)
 
         engine_result = extract_transformations(
             original_dir=original_dir,

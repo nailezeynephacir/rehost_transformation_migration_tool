@@ -101,6 +101,14 @@ def find_normalized_matches(source_text: str, target_text: str) -> List[Dict[str
     # Each result contains the real start and end character positions from the original source text.
     normalized_source, source_positions = (normalize_code_with_positions(source_text))
 
+    return search_normalized_text(normalized_source, source_positions, source_text, target_text)
+
+
+def search_normalized_text(normalized_source: str, source_positions: List[int], source_text: str, target_text: str) -> List[Dict[str, Any]]:
+    # The actual search, given text that's already been normalized - split
+    # out of find_normalized_matches() specifically so a caller that already
+    # has a cached normalization (see get_normalized_region below) doesn't
+    # have to redo it just to run a different search against the same text.
     normalized_target = normalize_code_text(target_text)
 
     if not normalized_target:
@@ -138,6 +146,22 @@ def find_normalized_matches(source_text: str, target_text: str) -> List[Dict[str
     return matches
 
 
+def get_normalized_region(region: Dict[str, Any]) -> Tuple[str, List[int]]:
+    # Masking and normalizing a region's text costs the same every time,
+    # and the same region gets searched once per branch of every block
+    # whose scope routes through it - potentially hundreds of times per
+    # file (this is E1, confirmed by direct profiling on 2026-07-28).
+    # Cached directly on the region dict, not in a module-level cache:
+    # region dicts are built fresh per extraction/application call and
+    # garbage collected once it finishes, so this cache is automatically
+    # scoped to exactly one run - no risk of a stale or wrong result
+    # leaking into a different request in a long-running server process.
+    if "_normalized_cache" not in region:
+        region["_normalized_cache"] = normalize_code_with_positions(region["text"])
+
+    return region["_normalized_cache"]
+
+
 def move_matches_to_source_positions(matches: List[Dict[str, Any]], region_start: int, source_text: str) -> List[Dict[str, Any]]:
     # Convert positions relative to a search region into positions relative to the complete source file.
     # Region olarak baktığımız için tüm dosyadaki yerlerini bulmamız gerekiyor sonrasında.
@@ -163,7 +187,9 @@ def find_matches_in_regions(source_text: str, regions: List[Dict[str, Any]], tar
     matches = []
 
     for region in regions:
-        local_matches = find_normalized_matches(region["text"],target_text)
+        normalized_region_text, region_positions = get_normalized_region(region)
+
+        local_matches = search_normalized_text(normalized_region_text, region_positions, region["text"], target_text)
 
         matches.extend(move_matches_to_source_positions(local_matches,region["start"],source_text))
 
@@ -236,7 +262,14 @@ def build_non_function_regions(source_text: str, functions: List[Dict[str, Any]]
 
 def count_normalized_occurrences(regions: List[Dict[str, Any]], target_text: str,) -> int:
     # Use the same boundary-aware matching logic as the application stage.
-    return sum(
-        len(find_normalized_matches(region["text"], target_text))
-        for region in regions
-    )
+    # Confirmed via direct profiling (2026-07-28) to be the dominant real
+    # cost in extraction - was re-normalizing every region's full text on
+    # every single call, once per branch of every block. get_normalized_region
+    # makes that a one-time cost per region instead.
+    total = 0
+
+    for region in regions:
+        normalized_region_text, region_positions = get_normalized_region(region)
+        total += len(search_normalized_text(normalized_region_text, region_positions, region["text"], target_text))
+
+    return total

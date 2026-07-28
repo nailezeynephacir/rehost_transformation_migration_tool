@@ -1,12 +1,16 @@
 <script setup lang="ts">
-import { ref } from "vue";
+import { computed, ref } from "vue";
 import type { TransformationResult } from "../../types/api";
 import StatusBadge from "../common/StatusBadge.vue";
 import TransformationDetails from "./TransformationDetails.vue";
 
-defineProps<{ results: TransformationResult[] }>();
+const props = withDefaults(
+  defineProps<{ results: TransformationResult[]; showMacroColumn?: boolean }>(),
+  { showMacroColumn: true }
+);
 
 const expandedId = ref<string | null>(null);
+const detailColspan = computed(() => (props.showMacroColumn ? 5 : 4));
 
 function toggle(id: string | null) {
   expandedId.value = expandedId.value === id ? null : id;
@@ -22,7 +26,7 @@ function toggle(id: string | null) {
           <th class="px-4 py-2">Function</th>
           <th class="px-4 py-2">Scope</th>
           <th class="px-4 py-2">Status</th>
-          <th class="px-4 py-2">Macro</th>
+          <th v-if="showMacroColumn" class="px-4 py-2">Macro</th>
         </tr>
       </thead>
       <tbody>
@@ -35,7 +39,7 @@ function toggle(id: string | null) {
             <td class="px-4 py-2 text-gray-600">{{ result.function_name ?? "\u2014" }}</td>
             <td class="px-4 py-2 text-gray-600">{{ result.scope ?? "\u2014" }}</td>
             <td class="px-4 py-2"><StatusBadge :status="result.status" /></td>
-            <td class="px-4 py-2">
+            <td v-if="showMacroColumn" class="px-4 py-2">
               <span
                 v-if="result.matched_macro"
                 class="inline-block rounded-full bg-gray-100 text-gray-600 text-xs px-2 py-0.5"
@@ -46,7 +50,7 @@ function toggle(id: string | null) {
             </td>
           </tr>
           <tr v-if="expandedId === result.transformation_id">
-            <td colspan="5" class="p-0">
+            <td :colspan="detailColspan" class="p-0">
               <TransformationDetails :result="result" />
             </td>
           </tr>

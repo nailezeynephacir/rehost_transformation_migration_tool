@@ -1,23 +1,20 @@
 <script setup lang="ts">
-import { ref, computed, onBeforeUnmount } from "vue";
-import { postExtract, getRun } from "../api/rehostApi";
-import { extractErrorMessage } from "../api/clients";
-import type { RunResponse } from "../types/api";
+import { computed } from "vue";
+import { ref } from "vue";
+import { postExtract } from "../api/rehostApi";
+import { useRunPolling } from "../composables/useRunPolling";
 import FileDropzone from "../components/upload/FileDropzone.vue";
 import TargetMacroInput from "../components/common/TargetMacroInput.vue";
+import MacroChipList from "../components/common/MacroChipList.vue";
 import SummaryCards from "../components/results/SummaryCards.vue";
 import TransformationTable from "../components/results/TransformationTable.vue";
+import DownloadCard from "../components/results/DownloadCard.vue";
 
 const originalFile = ref<File | null>(null);
 const rehostFile = ref<File | null>(null);
 const targetMacros = ref<string[]>([]);
 
-const run = ref<RunResponse | null>(null);
-const errorMessage = ref<string | null>(null);
-const isSubmitting = ref(false);
-
-let pollHandle: ReturnType<typeof setTimeout> | null = null;
-const POLL_INTERVAL_MS = 2000;
+const { run, errorMessage, isSubmitting, start } = useRunPolling();
 
 // Only valid (identifier-shaped) macros count toward "ready to run" -
 // mirrors the same rule TargetMacroInput uses to flag chips, so the two
@@ -29,44 +26,10 @@ const canRun = computed(
   () => !!originalFile.value && !!rehostFile.value && hasValidMacro.value && !isSubmitting.value
 );
 
-async function handleRun() {
+function handleRun() {
   if (!originalFile.value || !rehostFile.value) return;
-
-  isSubmitting.value = true;
-  errorMessage.value = null;
-  run.value = null;
-
-  try {
-    const created = await postExtract(originalFile.value, rehostFile.value, targetMacros.value);
-    schedulePoll(created.run_id);
-  } catch (error) {
-    errorMessage.value = extractErrorMessage(error);
-  } finally {
-    isSubmitting.value = false;
-  }
+  start(() => postExtract(originalFile.value as File, rehostFile.value as File, targetMacros.value));
 }
-
-function schedulePoll(runId: string) {
-  const poll = async () => {
-    try {
-      const response = await getRun(runId);
-      run.value = response;
-
-      if (response.status === "queued" || response.status === "running") {
-        pollHandle = setTimeout(poll, POLL_INTERVAL_MS);
-      }
-    } catch (error) {
-      errorMessage.value = extractErrorMessage(error);
-    }
-  };
-  poll();
-}
-
-// Stop polling if the user navigates away mid-run - otherwise a dangling
-// timer keeps calling an API for a component that no longer exists.
-onBeforeUnmount(() => {
-  if (pollHandle) clearTimeout(pollHandle);
-});
 </script>
 
 <template>
@@ -105,19 +68,15 @@ onBeforeUnmount(() => {
     </div>
 
     <div v-if="run && run.status === 'completed'" class="space-y-4">
-      <div v-if="run.target_macros?.length" class="flex flex-wrap gap-2 items-center text-sm">
-        <span class="text-gray-500">This run searched for:</span>
-        <span
-          v-for="macro in run.target_macros"
-          :key="macro"
-          class="rounded-full bg-gray-100 text-gray-600 text-xs px-2.5 py-1"
-        >
-          {{ macro }}
-        </span>
-      </div>
+      <MacroChipList
+        v-if="run.target_macros?.length"
+        label="This run searched for:"
+        :macros="run.target_macros"
+      />
 
       <SummaryCards :summary="run.summary" />
       <TransformationTable :results="run.results" />
+      <DownloadCard :run-id="run.run_id" :artifacts="run.artifacts" />
     </div>
   </div>
 </template>

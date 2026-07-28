@@ -219,10 +219,17 @@ def select_matching_original_branch(block: Dict[str, Any], search_regions: List[
     if len(found_matches) == 1:
         selected_match = found_matches[0]
 
-        if (selected_match["occurrence_count"] > 1 and block["scope"] != "function"):
+        # Sibling team decision (2026-07-28): multiple untransformed matches
+        # are ambiguous in every scope, including function scope - removed
+        # the prior scope exception. Rationale: two identical matches inside
+        # one function don't prove both were meant to change - if only one
+        # of them was actually guarded in the real rehost, extraction can't
+        # tell which without this check, and would learn a transformation
+        # that wasn't actually made.
+        if selected_match["occurrence_count"] > 1:
             return (
                 None,
-                "The matching branch was found more than once outside function scope, so the match is ambiguous.",
+                "The matching branch was found more than once in the required scope, so the match is ambiguous.",
                 branch_results,
             )
 
@@ -931,11 +938,16 @@ def build_support_files(rehost_only_paths: List[str], rehost_files: Dict[str, Pa
     return (support_files, report_entries, warnings)
 
 
-def save_transformations_json(transformations: List[Dict[str, Any]], support_files: List[Dict[str, str]], output_file: Path) -> None:
+def save_transformations_json(transformations: List[Dict[str, Any]], support_files: List[Dict[str, str]], target_macros: set, output_file: Path) -> None:
     # Keep the permanent JSON small and application-focused.
+    # target_macros is included so a downstream consumer (e.g. the web UI)
+    # can display what a run was searched for without needing to keep its
+    # own separate record - sorted for deterministic output, since sets
+    # don't have a stable iteration order and aren't JSON-serializable directly.
     output_data = {
         "transformations": transformations,
         "support_files": support_files,
+        "target_macros": sorted(target_macros),
     }
 
     output_file.write_text(
@@ -1229,6 +1241,7 @@ def extract_transformations(
     save_transformations_json(
         transformations=all_transformations,
         support_files=all_support_files,
+        target_macros=target_macros,
         output_file=transformations_path
     )
 
