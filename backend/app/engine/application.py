@@ -7,7 +7,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import os
 import tempfile
 
-from .parser import parse_source
+from .parser import exclude_functions_in_disabled_regions, parse_source
 from .transformation_matching import build_non_function_regions, find_matches_in_regions, find_matching_function
 
 
@@ -109,8 +109,17 @@ def build_transformation_search_regions(source_text: str, transformation: Dict[s
         )
 
     if scope in {"include", "global"}:
+        # Function-shaped constructs sitting entirely inside a provably-dead
+        # "#if 0" block (see B3) must not be carved out of global/include
+        # search text - find_function_regions() can't tell them apart from
+        # real, live functions, so that exclusion is done explicitly here,
+        # only for this specific caller.
+        searchable_functions = exclude_functions_in_disabled_regions(
+            functions, parse_result["conditional_blocks"]
+        )
+
         return (
-            build_non_function_regions(source_text, functions),
+            build_non_function_regions(source_text, searchable_functions),
             None,
             parser_warnings
         )

@@ -2,7 +2,7 @@
 import { computed, ref, watch } from "vue";
 import { postApply } from "../api/rehostApi";
 import { useRunPolling } from "../composables/useRunPolling";
-import { parseTargetMacrosFromJson } from "../utils/parseTargetMacros";
+import { parseTargetMacrosFromJson } from "../utils/parseTargetMacro";
 import FileDropzone from "../components/upload/FileDropzone.vue";
 import MacroChipList from "../components/common/MacroChipList.vue";
 import SummaryCards from "../components/results/SummaryCards.vue";
@@ -13,7 +13,7 @@ const newOriginalFile = ref<File | null>(null);
 const transformationsFile = ref<File | null>(null);
 const uploadedMacros = ref<string[] | null>(null);
 
-const { run, errorMessage, isSubmitting, start } = useRunPolling();
+const { run, errorMessage, isSubmitting, isPending, start } = useRunPolling();
 
 // Preview the macros a rules file was built for, read directly from the
 // file the moment it's picked - purely informational, doesn't gate
@@ -77,7 +77,7 @@ function handleRun() {
       <p v-if="errorMessage" class="text-sm text-red-600">{{ errorMessage }}</p>
     </div>
 
-    <div v-if="run && (run.status === 'queued' || run.status === 'running')" class="text-center text-gray-500 text-sm">
+    <div v-if="run && isPending" class="text-center text-gray-500 text-sm">
       Run {{ run.run_id }} is {{ run.status }}\u2026
     </div>
 

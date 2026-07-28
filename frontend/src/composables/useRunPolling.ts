@@ -1,6 +1,6 @@
 import { ref, computed, onBeforeUnmount } from "vue";
 import { getRun } from "../api/rehostApi";
-import { extractErrorMessage } from "../api/client";
+import { extractErrorMessage } from "../api/clients";
 import type { RunCreatedResponse, RunResponse } from "../types/api";
 
 const POLL_INTERVAL_MS = 2000;

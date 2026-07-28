@@ -14,7 +14,7 @@ const originalFile = ref<File | null>(null);
 const rehostFile = ref<File | null>(null);
 const targetMacros = ref<string[]>([]);
 
-const { run, errorMessage, isSubmitting, start } = useRunPolling();
+const { run, errorMessage, isSubmitting, isPending, start } = useRunPolling();
 
 // Only valid (identifier-shaped) macros count toward "ready to run" -
 // mirrors the same rule TargetMacroInput uses to flag chips, so the two
@@ -59,7 +59,7 @@ function handleRun() {
       <p v-if="errorMessage" class="text-sm text-red-600">{{ errorMessage }}</p>
     </div>
 
-    <div v-if="run && (run.status === 'queued' || run.status === 'running')" class="text-center text-gray-500 text-sm">
+    <div v-if="run && isPending" class="text-center text-gray-500 text-sm">
       Run {{ run.run_id }} is {{ run.status }}\u2026
     </div>
 

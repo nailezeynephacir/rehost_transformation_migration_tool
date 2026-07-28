@@ -3,7 +3,7 @@ from pathlib import Path
 import json
 from typing import Any, Dict, List, Optional, Set, Tuple
 
-from .parser import parse_source
+from .parser import exclude_functions_in_disabled_regions, parse_source
 from .transformation_matching import (
     build_non_function_regions,
     count_normalized_occurrences,
@@ -702,9 +702,23 @@ def extract_file_transformations(original_source: str, rehost_source: str, origi
             )
         return transformations, report_entries
 
+    # Function-shaped constructs sitting entirely inside a provably-dead
+    # "#if 0" block (see B3) must not be carved out of global/include search
+    # text - find_function_regions() can't tell them apart from real, live
+    # functions, so that exclusion is done explicitly here, only for the
+    # regions built below. original_functions/rehost_functions themselves
+    # stay unfiltered - function-scope matching elsewhere in this file still
+    # needs to find such a function by name/signature if directly targeted.
+    original_searchable_functions = exclude_functions_in_disabled_regions(
+        original_functions, original_parse_result["conditional_blocks"]
+    )
+    rehost_searchable_functions = exclude_functions_in_disabled_regions(
+        rehost_functions, conditional_blocks
+    )
+
     # These regions depend only on the parsed file, so build them once per file.
-    original_non_function_regions = build_non_function_regions(original_source, original_functions,)
-    rehost_non_function_regions = build_non_function_regions(rehost_source, rehost_functions,)
+    original_non_function_regions = build_non_function_regions(original_source, original_searchable_functions,)
+    rehost_non_function_regions = build_non_function_regions(rehost_source, rehost_searchable_functions,)
 
     for block in transformation_candidate_blocks:
 

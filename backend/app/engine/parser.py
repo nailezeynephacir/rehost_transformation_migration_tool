@@ -231,13 +231,19 @@ def has_top_level_assignment(text: str) -> bool:
     return False
 
 
-def find_function_regions(content: str) -> Tuple[List[Dict[str, Any]], List[str]]:
+def find_function_regions(content: str, masked_content: Optional[str] = None) -> Tuple[List[Dict[str, Any]], List[str]]:
     # Find ordinary function definitions by tracking top-level braces.
     # The parser is conservative and does not attempt to understand every possible C++ construct.
 
     # parser sıradan fonksiyonları kabul ederken initializer ve lambda gibi şüpheli yapıları temkinli biçimde dışarıda bırakıyor.
 
-    masked_content = mask_comments_and_literals(content)
+    # masked_content is an optional pre-computed pass-through so a caller that
+    # already masked this exact content (parse_source, sharing it with
+    # extract_conditional_blocks) never pays for the same O(n) masking twice.
+    # mask_comments_and_literals is a pure function of content alone, so a
+    # caller-supplied value is always byte-identical to recomputing it here.
+    if masked_content is None:
+        masked_content = mask_comments_and_literals(content)
 
     # fonksiyon bu iki listeyi döndürüyor:
     functions = []      # --> name, signature, normalized_signature, start, body_start, body_end, end, content
@@ -412,7 +418,7 @@ def classify_conditional_scope(block: Dict[str, Any], functions: List[Dict[str, 
     }
 
 
-def extract_conditional_blocks(content: str, functions: Optional[List[Dict[str, Any]]] = None, target_macros: Optional[Set[str]] = None,
+def extract_conditional_blocks(content: str, functions: Optional[List[Dict[str, Any]]] = None, target_macros: Optional[Set[str]] = None, masked_content: Optional[str] = None,
 ) -> Tuple[List[Dict[str, Any]], List[str]]:
     # #if / #ifdef / #ifndef buluyor.
     # girdi olarak tüm metni ve çıkarttığımız fonksiyon listesini alıyor.
@@ -422,9 +428,14 @@ def extract_conditional_blocks(content: str, functions: Optional[List[Dict[str, 
     # Stack-based parsing allows nested #if blocks to be matched with the correct #endif.
     if target_macros is None:
         target_macros = set()
-    
+
+    # Same sharing as find_function_regions's masked_content parameter: reuse
+    # a caller-supplied pass instead of masking this exact content again.
+    if masked_content is None:
+        masked_content = mask_comments_and_literals(content)
+
     if functions is None:
-        functions, function_warnings = (find_function_regions(content))
+        functions, function_warnings = (find_function_regions(content, masked_content=masked_content))
 
     else:
         function_warnings = []
@@ -435,7 +446,7 @@ def extract_conditional_blocks(content: str, functions: Optional[List[Dict[str, 
     stack = []
 
     original_lines = content.splitlines(keepends=True)
-    masked_lines = (mask_comments_and_literals(content).splitlines(keepends=True))
+    masked_lines = masked_content.splitlines(keepends=True)
 
     logical_lines = []
 
@@ -676,6 +687,76 @@ def extract_conditional_blocks(content: str, functions: Optional[List[Dict[str, 
     return blocks, warnings
 
 
+# Recognizes the "#if 0" idiom - code deliberately written to never compile,
+# regardless of which macros are defined. Deliberately narrow: only a literal
+# 0 (optionally parenthesized/whitespace-padded), not arbitrary constant
+# folding or knowledge of which macros are defined - this parser has no way
+# to evaluate the latter, and a false positive here (treating a block that
+# might actually compile as permanently dead) would be a correctness bug,
+# not just a missed optimization. Under-detecting dead blocks is safe -
+# it just leaves B3's gap open for that specific block, same as today.
+PERMANENTLY_FALSE_CONDITION_PATTERN = re.compile(r"^\(?\s*0\s*\)?$")
+
+
+def find_permanently_disabled_spans(conditional_blocks: List[Dict[str, Any]]) -> List[Tuple[int, int]]:
+    # A block is only provably dead when it has exactly one branch (no
+    # #elif/#else giving it another way to ever compile) and that branch's
+    # own condition is unconditionally false. Returns the branch's content
+    # span (between the #if and #endif lines), matching where
+    # find_function_regions would have found a function-shaped construct
+    # sitting inside it.
+    disabled_spans = []
+
+    for block in conditional_blocks:
+        branches = block.get("branches", [])
+
+        if len(branches) != 1:
+            continue
+
+        (branch,) = branches
+
+        if branch["directive"] != "if":
+            continue
+
+        if not PERMANENTLY_FALSE_CONDITION_PATTERN.match(branch["condition"].strip()):
+            continue
+
+        content_start = branch.get("content_start")
+        content_end = branch.get("content_end")
+
+        if content_start is not None and content_end is not None:
+            disabled_spans.append((content_start, content_end))
+
+    return disabled_spans
+
+
+def exclude_functions_in_disabled_regions(functions: List[Dict[str, Any]], conditional_blocks: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    # find_function_regions() is a pure brace-tracker with no concept of
+    # preprocessor state, so a function-shaped construct sitting entirely
+    # inside a provably-dead "#if 0" block is indistinguishable to it from a
+    # real, live function. That's fine for most consumers of `functions`
+    # (e.g. function-scope matching still needs to be able to find such a
+    # function by name/signature if a transformation explicitly targets it),
+    # but it's wrong for build_non_function_regions(): a dead function's
+    # span should not be carved out of global/include-scope search text,
+    # since nothing live actually occupies that span. Only the copy of
+    # `functions` passed into build_non_function_regions should be filtered -
+    # this does not change `functions` itself or any other caller.
+    disabled_spans = find_permanently_disabled_spans(conditional_blocks)
+
+    if not disabled_spans:
+        return functions
+
+    return [
+        function
+        for function in functions
+        if not any(
+            span_start <= function["start"] and function["end"] <= span_end
+            for span_start, span_end in disabled_spans
+        )
+    ]
+
+
 def extract_referenced_macros(condition: str) -> Set[str]:
     # Extract identifier tokens referenced by a preprocessor condition.
     # Exact identifiers are returned so REHOST_MODE does not match identifiers such as REHOST_MODE_EXTRA.
@@ -688,12 +769,18 @@ def extract_referenced_macros(condition: str) -> Set[str]:
 
 def parse_source(content: str, target_macros: Optional[Set[str]] = None,) -> Dict[str, Any]:
     # Run the two small parsing stages required by this project.
-    functions, function_warnings = find_function_regions(content)
+    # Both stages independently need the same masked (comments/literals
+    # blanked out) version of content - masked once here and shared, instead
+    # of each stage repeating the identical O(n) character-by-character pass.
+    masked_content = mask_comments_and_literals(content)
+
+    functions, function_warnings = find_function_regions(content, masked_content=masked_content)
 
     conditional_blocks, conditional_warnings = extract_conditional_blocks(
         content,
         functions=functions,
         target_macros=target_macros,
+        masked_content=masked_content,
     )
 
     return {
