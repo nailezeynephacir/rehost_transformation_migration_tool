@@ -11,7 +11,6 @@ from app.services import run_service
 
 logger = logging.getLogger(__name__)
 
-MOCK_PROCESSING_DELAY_SECONDS = 4
 
 
 async def start_application(new_original: UploadFile, transformations: UploadFile) -> str:
@@ -57,7 +56,6 @@ def _safe_extract_zip(zip_path: Path, destination: Path) -> None:
 
 async def _process_application(run_id: str, run_dir) -> None:
     run_service.mark_running(run_id)
-    await asyncio.sleep(MOCK_PROCESSING_DELAY_SECONDS)
 
     try:
         new_original_dir = run_dir / "new_original"
