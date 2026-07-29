@@ -1,0 +1,30 @@
+# Runtime data - real uploaded source code and generated output, grows
+# unbounded, never belongs in git history. This was an explicit requirement
+# from the sibling team's own architecture review, not just general hygiene.
+# Scoped to the whole runtime/ folder, not just runs/, in case anything else
+# (logs, caches) ever gets written there.
+backend/runtime/
+
+# Frontend dependencies - regenerated entirely from package.json via npm install
+frontend/node_modules/
+
+# Frontend build output - regenerated via npm run build
+frontend/dist/
+
+# Python bytecode cache
+__pycache__/
+*.pyc
+
+# Python virtual environment, if one gets created locally
+backend/.venv/
+backend/venv/
+
+# Environment/secrets - none exist yet, but the rule should exist before it's needed
+.env
+.env.local
+
+# Editor/OS cruft
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
