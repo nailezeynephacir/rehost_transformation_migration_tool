@@ -5,6 +5,7 @@ import type { Artifact } from "../../types/api";
 const props = defineProps<{ runId: string; artifacts: Artifact[] }>();
 
 function labelFor(artifact: Artifact): string {
+  if (artifact.type === "generated_project_zip") return "Download Generated Project (.zip)";
   if (artifact.type === "generated_file") return artifact.name;
   if (artifact.type === "extraction_report" || artifact.type === "application_report") {
     return "Download Report (.txt)";
