@@ -1,6 +1,6 @@
 from typing import Any, Dict, List, Optional, Tuple
 
-from parser import mask_comments,normalize_function_signature
+from legacy.standalone_algorithm.parser import mask_comments,normalize_function_signature
 
 # Aramayı boşluksuz ve yorumsuz kod üzerinde yaparız (normalize_code_text). 
 # Değişikliği ise pozisyon haritası sayesinde gerçek kaynak kod üzerinde yaparız. (normalize_code_with_positions)

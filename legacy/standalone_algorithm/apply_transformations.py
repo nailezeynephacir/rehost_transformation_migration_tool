@@ -6,8 +6,8 @@ from typing import Any, Dict, List, Optional, Tuple
 import os
 import tempfile
 
-from parser import parse_source
-from transformation_matching import build_non_function_regions, find_matches_in_regions, find_matching_function
+from legacy.standalone_algorithm.parser import parse_source
+from legacy.standalone_algorithm.transformation_matching import build_non_function_regions, find_matches_in_regions, find_matching_function
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 

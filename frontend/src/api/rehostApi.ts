@@ -34,5 +34,5 @@ export async function getRun(runId: string): Promise<RunResponse> {
 
 export function artifactDownloadUrl(runId: string, artifactName: string): string {
   const base = apiClient.defaults.baseURL ?? "";
-  return `${base}/runs/${runId}/artifacts/${artifactName}`;
+  return `${base}/runs/${encodeURIComponent(runId)}/artifacts/${encodeURIComponent(artifactName)}`;
 }

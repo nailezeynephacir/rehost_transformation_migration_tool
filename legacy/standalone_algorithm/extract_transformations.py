@@ -3,8 +3,8 @@ import json
 import argparse
 from typing import Any, Dict, List, Optional, Tuple
 
-from parser import parse_source
-from transformation_matching import build_non_function_regions, count_normalized_occurrences, find_matching_function, normalize_code_text
+from legacy.standalone_algorithm.parser import parse_source
+from legacy.standalone_algorithm.transformation_matching import build_non_function_regions, count_normalized_occurrences, find_matching_function, normalize_code_text
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent

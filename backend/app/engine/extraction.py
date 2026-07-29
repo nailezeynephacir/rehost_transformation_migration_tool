@@ -29,15 +29,20 @@ SUPPORT_FILE_EXTENSIONS = {
     ".bat",
     ".cmd",
     ".ps1",
-    "json",
+    ".json",
     ".yaml",
-    ".toml"
+    ".yml",
+    ".toml",
     ".cmake",
+}
+
+SUPPORT_FILE_NAMES = {
     "CMakeLists.txt",
     "Makefile",
 }
 
-TRACKED_FILE_EXTENSIONS = (PARSED_SOURCE_EXTENSIONS | SUPPORT_FILE_EXTENSIONS)
+TRACKED_FILE_EXTENSIONS = PARSED_SOURCE_EXTENSIONS | SUPPORT_FILE_EXTENSIONS
+TRACKED_FILE_NAMES = SUPPORT_FILE_NAMES
 
 
 @dataclass
@@ -108,8 +113,10 @@ def read_support_file_content(file_path: Path) -> str:
     raise UnicodeError(f"Support file could not be decoded: {file_path}. Tried encodings: {', '.join(encodings)}")
 
 
-def find_project_files(source_directory: Path, allowed_extensions: set) -> Dict[str, Path]:
+def find_project_files(source_directory: Path, allowed_extensions: set, allowed_names: Optional[Set[str]] = None,) -> Dict[str, Path]:
     # Find files with the requested extensions recursively.
+    allowed_names = allowed_names or set()
+
     if not source_directory.exists():
         raise FileNotFoundError(f"Source directory was not found: {source_directory}")
 
@@ -122,7 +129,8 @@ def find_project_files(source_directory: Path, allowed_extensions: set) -> Dict[
         if not file_path.is_file():
             continue
 
-        if file_path.suffix.lower() not in allowed_extensions:
+        if (file_path.suffix.lower() not in allowed_extensions
+            and file_path.name not in allowed_names):
             continue
 
         relative_file_path = (file_path.relative_to(source_directory).as_posix())
@@ -1175,8 +1183,16 @@ def extract_transformations(
     original_source_files = find_project_files(original_dir, PARSED_SOURCE_EXTENSIONS)
     rehost_source_files = find_project_files(rehost_dir, PARSED_SOURCE_EXTENSIONS)
 
-    original_tracked_files = find_project_files(original_dir, TRACKED_FILE_EXTENSIONS)
-    rehost_tracked_files = find_project_files(rehost_dir, TRACKED_FILE_EXTENSIONS)
+    original_tracked_files = find_project_files(
+        original_dir,
+        TRACKED_FILE_EXTENSIONS,
+        TRACKED_FILE_NAMES,
+    )
+    rehost_tracked_files = find_project_files(
+        rehost_dir,
+        TRACKED_FILE_EXTENSIONS,
+        TRACKED_FILE_NAMES,
+    )
 
     original_source_paths = set(original_source_files)
     rehost_source_paths = set(rehost_source_files)

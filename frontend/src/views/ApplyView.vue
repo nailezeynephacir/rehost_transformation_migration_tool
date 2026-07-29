@@ -37,7 +37,7 @@ watch(transformationsFile, async (file) => {
 // at all (confirmed against the real engine: it never re-derives target
 // status, it only replays what extraction already decided).
 const canRun = computed(
-  () => !!newOriginalFile.value && !!transformationsFile.value && !isSubmitting.value
+  () => !!newOriginalFile.value && !!transformationsFile.value && !isSubmitting.value && !isPending.value
 );
 
 function handleRun() {
@@ -71,7 +71,7 @@ function handleRun() {
         ]"
         @click="handleRun"
       >
-        {{ isSubmitting ? "Starting\u2026" : "Run Application" }}
+        {{ isSubmitting ? "Starting…" : isPending ? "Running…" : "Run Application" }}
       </button>
 
       <p v-if="errorMessage" class="text-sm text-red-600">{{ errorMessage }}</p>
