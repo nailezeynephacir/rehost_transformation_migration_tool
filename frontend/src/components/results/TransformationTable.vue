@@ -9,7 +9,7 @@ const props = withDefaults(
   { showMacroColumn: true }
 );
 
-const expandedIndex = ref<string | null>(null);
+const expandedIndex = ref<number | null>(null);
 const detailColspan = computed(() => (props.showMacroColumn ? 5 : 4));
 
 function toggle(index: number) {
