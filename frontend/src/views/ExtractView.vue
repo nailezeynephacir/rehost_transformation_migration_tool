@@ -23,7 +23,7 @@ const IDENTIFIER_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/;
 const hasValidMacro = computed(() => targetMacros.value.some((m) => IDENTIFIER_PATTERN.test(m)));
 
 const canRun = computed(
-  () => !!originalFile.value && !!rehostFile.value && hasValidMacro.value && !isSubmitting.value
+  () => !!originalFile.value && !!rehostFile.value && hasValidMacro.value && !isSubmitting.value && !isPending.value
 );
 
 function handleRun() {
@@ -53,7 +53,7 @@ function handleRun() {
         ]"
         @click="handleRun"
       >
-        {{ isSubmitting ? "Starting\u2026" : "Run Extraction" }}
+        {{ isSubmitting ? "Starting…" : isPending ? "Running…" : "Run Extraction" }}
       </button>
 
       <p v-if="errorMessage" class="text-sm text-red-600">{{ errorMessage }}</p>

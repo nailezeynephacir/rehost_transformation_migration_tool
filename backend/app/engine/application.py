@@ -449,7 +449,11 @@ def apply_single_transformation(source_text: str, transformation: Dict[str, Any]
         "file": transformation.get("file"),
         "scope": transformation.get("scope"),
         "function_name": (get_transformation_function_name(transformation)),
-        "expected_match": transformation.get("match", ""),
+        "expected_match": (
+            transformation.get("match")
+            if isinstance(transformation.get("match"), str)
+            else ""
+        ),
         "result": "SKIPPED",
         "reason": "",
         "match_count": 0,
@@ -469,6 +473,14 @@ def apply_single_transformation(source_text: str, transformation: Dict[str, Any]
         result["reason"] = error
         return source_text, result
 
+    expected_match = transformation.get("match")
+
+    if not isinstance(expected_match, str) or not expected_match.strip():
+        result["reason"] = (
+            "The transformation does not contain a valid match string."
+        )
+        return source_text, result
+
     replacement = transformation.get("replacement")
 
     if not isinstance(replacement, str):
@@ -480,7 +492,11 @@ def apply_single_transformation(source_text: str, transformation: Dict[str, Any]
     result["replacement_match_count"] = len(replacement_matches)
 
     # Then locate every occurrence of the old original code.
-    original_matches = find_matches_in_regions(source_text, regions, transformation.get("match", ""))
+    original_matches = find_matches_in_regions(
+        source_text,
+        regions,
+        expected_match,
+    )
 
     # The original branch also exists inside a complete conditional block.
     # Exclude such matches to avoid creating nested #ifdef blocks.

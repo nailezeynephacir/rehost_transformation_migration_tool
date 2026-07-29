@@ -9,11 +9,11 @@ const props = withDefaults(
   { showMacroColumn: true }
 );
 
-const expandedId = ref<string | null>(null);
+const expandedIndex = ref<string | null>(null);
 const detailColspan = computed(() => (props.showMacroColumn ? 5 : 4));
 
-function toggle(id: string | null) {
-  expandedId.value = expandedId.value === id ? null : id;
+function toggle(index: number) {
+  expandedIndex.value = expandedIndex.value === index ? null : index;
 }
 </script>
 
@@ -30,10 +30,13 @@ function toggle(id: string | null) {
         </tr>
       </thead>
       <tbody>
-        <template v-for="result in results" :key="result.transformation_id ?? result.file">
+        <template
+          v-for="(result, index) in results"
+          :key="result.transformation_id ?? `${result.file}-${index}`"
+        >
           <tr
             class="border-t border-gray-100 cursor-pointer hover:bg-gray-50"
-            @click="toggle(result.transformation_id)"
+            @click="toggle(index)"
           >
             <td class="px-4 py-2 font-mono text-xs">{{ result.file }}</td>
             <td class="px-4 py-2 text-gray-600">{{ result.function_name ?? "\u2014" }}</td>
@@ -49,7 +52,7 @@ function toggle(id: string | null) {
               <span v-else class="text-gray-300">&mdash;</span>
             </td>
           </tr>
-          <tr v-if="expandedId === result.transformation_id">
+          <tr v-if="expandedIndex === index">
             <td :colspan="detailColspan" class="p-0">
               <TransformationDetails :result="result" />
             </td>
