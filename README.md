@@ -596,3 +596,11 @@ This tool assists with transferring rehost modifications, but it does not replac
 - or validation on the target platform.
 
 Every generated project should be reviewed and tested before use.
+
+## Contributors
+
+- [Naile Zeynep Hacır]([GITHUB_PROFILE_LINK](https://github.com/nailezeynephacir))
+- [Eylül Öztürk]([GITHUB_PROFILE_LINK](https://github.com/lulye))
+- [Mustafa Batu Demir]([GITHUB_PROFILE_LINK](https://github.com/Batsy18))
+
+This project was developed collaboratively during an internship project at ASELSAN.
