@@ -3,8 +3,8 @@ import json
 import argparse
 from typing import Any, Dict, List, Optional, Tuple
 
-from legacy.standalone_algorithm.parser import parse_source
-from legacy.standalone_algorithm.transformation_matching import build_non_function_regions, count_normalized_occurrences, find_matching_function, normalize_code_text
+from parser import parse_source
+from transformation_matching import build_non_function_regions, count_normalized_occurrences, find_matching_function, normalize_code_text
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent
@@ -34,15 +34,20 @@ SUPPORT_FILE_EXTENSIONS = {
     ".bat",
     ".cmd",
     ".ps1",
-    "json",
+    ".json",
     ".yaml",
-    ".toml"
-    ".cmake", 
-    "CMakeLists.txt",
-    "Makefile",  
+    ".yml",
+    ".toml",
+    ".cmake",
 }
 
-TRACKED_FILE_EXTENSIONS = (PARSED_SOURCE_EXTENSIONS | SUPPORT_FILE_EXTENSIONS)
+SUPPORT_FILE_NAMES = {
+    "CMakeLists.txt",
+    "Makefile",
+}
+
+TRACKED_FILE_EXTENSIONS = PARSED_SOURCE_EXTENSIONS | SUPPORT_FILE_EXTENSIONS
+TRACKED_FILE_NAMES = SUPPORT_FILE_NAMES
 
 
 def read_source_file(file_path: Path) -> str:
@@ -86,7 +91,7 @@ def read_support_file_content(file_path: Path) -> str:
     raise UnicodeError(f"Support file could not be decoded: {file_path}. Tried encodings: {', '.join(encodings)}")
 
 
-def find_project_files(source_directory: Path, allowed_extensions: set[str],) -> Dict[str, Path]:
+def find_project_files(source_directory: Path, allowed_extensions: set[str], allowed_names: Optional[set[str]] = None,) -> Dict[str, Path]:
     # Find files with the requested extensions recursively.
     if not source_directory.exists():
         raise FileNotFoundError(f"Source directory was not found: {source_directory}")
@@ -94,13 +99,17 @@ def find_project_files(source_directory: Path, allowed_extensions: set[str],) ->
     if not source_directory.is_dir():
         raise NotADirectoryError(f"Source path is not a directory: {source_directory}")
 
+    allowed_names = allowed_names or set()
     project_files = {}
 
     for file_path in source_directory.rglob("*"):
         if not file_path.is_file():
             continue
 
-        if file_path.suffix.lower() not in allowed_extensions:
+        extension_matches = (file_path.suffix.lower() in allowed_extensions)
+        name_matches = file_path.name in allowed_names
+
+        if not extension_matches and not name_matches:
             continue
 
         relative_file_path = (file_path.relative_to(source_directory).as_posix())
@@ -394,6 +403,83 @@ def find_containing_non_function_region(block: Dict[str, Any], rehost_non_functi
 
     return None
 
+def find_adjacent_function_anchors(block: Dict[str, Any],rehost_source: str,rehost_functions: List[Dict[str, Any]],original_functions: List[Dict[str, Any]],
+) -> Tuple[Optional[Dict[str, str]], Optional[Dict[str, str]]]:
+    # Use unchanged neighboring functions as safe boundaries for a file-level insertion when no ordinary text anchor is available.
+    following_function = None
+    preceding_function = None
+
+    sorted_functions = sorted(rehost_functions, key=lambda function: function["start"],)
+
+    for function in sorted_functions:
+        if function["end"] <= block["start"]:
+            gap = rehost_source[function["end"]:block["start"]]
+
+            # The function is a valid boundary only when nothing except whitespace exists between it and the conditional block.
+            if not gap.strip():
+                preceding_function = function
+
+        elif function["start"] >= block["end"]:
+            gap = rehost_source[block["end"]:function["start"]]
+
+            if not gap.strip():
+                following_function = function
+
+            break
+
+    def build_verified_reference(function: Optional[Dict[str, Any]],) -> Optional[Dict[str, str]]:
+        if function is None:
+            return None
+
+        matching_function, _ = find_matching_function(
+            original_functions,
+            function["name"],
+            function["signature"],
+        )
+
+        if matching_function is None:
+            return None
+
+        return {
+            "name": function["name"],
+            "signature": function["signature"],
+        }
+
+    return (
+        build_verified_reference(following_function),
+        build_verified_reference(preceding_function),
+    )
+
+def build_function_boundary_insertion_transformation(
+    transformation_number: int,
+    relative_file_path: str,
+    block: Dict[str, Any],
+    position: str,
+    function_anchor: Dict[str, str],
+    fallback_position: Optional[str] = None,
+    fallback_function_anchor: Optional[Dict[str, str]] = None,
+) -> Dict[str, Any]:
+    # Store a file-level insertion relative to a verified neighboring function.
+    transformation = {
+        "id": f"conditional_{transformation_number}",
+        "file": relative_file_path,
+        "scope": block["scope"],
+        "operation": "insert",
+        "position": position,
+        "function_anchor": function_anchor,
+        "content": block["full_text"].rstrip("\r\n"),
+    }
+
+    if (
+        fallback_position in {"before_function", "after_function"}
+        and isinstance(fallback_function_anchor, dict)
+    ):
+        transformation["fallback_position"] = fallback_position
+        transformation["fallback_function_anchor"] = (
+            fallback_function_anchor
+        )
+
+    return transformation
 
 def find_unique_following_non_function_anchor(block: Dict[str, Any], rehost_source: str, rehost_non_function_regions: List[Dict[str, Any]],original_search_regions: List[Dict[str, Any]]) -> Optional[str]:
     # Find a unique file-level code fragment after a rehost-only conditional block.
@@ -581,6 +667,8 @@ def build_report_entry(relative_file_path: str, block: Dict[str, Any], result: s
         anchor = transformation.get("anchor")
         fallback_position = transformation.get("fallback_position")
         fallback_anchor = transformation.get("fallback_anchor")
+        function_anchor = transformation.get("function_anchor")
+        fallback_function_anchor = transformation.get("fallback_function_anchor")
 
     return {
         "result": result,
@@ -593,6 +681,8 @@ def build_report_entry(relative_file_path: str, block: Dict[str, Any], result: s
         "anchor": anchor,
         "fallback_position": fallback_position,
         "fallback_anchor": fallback_anchor,
+        "function_anchor": function_anchor,
+        "fallback_function_anchor": fallback_function_anchor,
         "matched_branch_directive": branch_directive,
         "matched_branch_condition": branch_condition,
         "match_text": match_text.strip(),
@@ -675,6 +765,8 @@ def extract_transformations(original_source: str, rehost_source: str, original_p
                 insertion_anchor = None
                 fallback_position = None
                 fallback_anchor = None
+                function_anchor = None
+                fallback_function_anchor = None
 
                 if block["scope"] == "function":
                     insertion_position = determine_function_insertion_position(
@@ -737,6 +829,22 @@ def extract_transformations(original_source: str, rehost_source: str, original_p
                         insertion_position = "after"
                         insertion_anchor = preceding_anchor
 
+                    # If a global block has no usable text anchor, use unchanged neighboring functions as safe boundaries.
+                    if insertion_position is None and block["scope"] == "global":
+                        (following_function_anchor,preceding_function_anchor,
+                        ) = find_adjacent_function_anchors(block=block,rehost_source=rehost_source,rehost_functions=rehost_functions,original_functions=original_functions,)
+
+                        if following_function_anchor is not None:
+                            insertion_position = "before_function"
+                            function_anchor = following_function_anchor
+
+                            if preceding_function_anchor is not None:
+                                fallback_position = "after_function"
+                                fallback_function_anchor = preceding_function_anchor
+
+                        elif preceding_function_anchor is not None:
+                            insertion_position = "after_function"
+                            function_anchor = preceding_function_anchor
 
                 transformation = None
 
@@ -762,6 +870,23 @@ def extract_transformations(original_source: str, rehost_source: str, original_p
                             anchor=insertion_anchor,
                             fallback_position=fallback_position,
                             fallback_anchor=fallback_anchor
+                        )
+                    )
+
+                elif (
+                    insertion_position
+                    in {"before_function", "after_function"}
+                    and function_anchor is not None
+                ):
+                    transformation = (
+                        build_function_boundary_insertion_transformation(
+                            transformation_number=(starting_transformation_number+ len(transformations)),
+                            relative_file_path=relative_file_path,
+                            block=block,
+                            position=insertion_position,
+                            function_anchor=function_anchor,
+                            fallback_position=fallback_position,
+                            fallback_function_anchor=(fallback_function_anchor),
                         )
                     )
 
@@ -1067,8 +1192,8 @@ def main() -> None:
     original_source_files = find_project_files(ORIGINAL_DIR, PARSED_SOURCE_EXTENSIONS,)
     rehost_source_files = find_project_files(REHOST_DIR, PARSED_SOURCE_EXTENSIONS,)
 
-    original_tracked_files = find_project_files(ORIGINAL_DIR, TRACKED_FILE_EXTENSIONS,)
-    rehost_tracked_files = find_project_files(REHOST_DIR, TRACKED_FILE_EXTENSIONS,)
+    original_tracked_files = find_project_files(ORIGINAL_DIR, TRACKED_FILE_EXTENSIONS, TRACKED_FILE_NAMES,)
+    rehost_tracked_files = find_project_files(REHOST_DIR, TRACKED_FILE_EXTENSIONS, TRACKED_FILE_NAMES,)
 
     original_source_paths = set(original_source_files)
     rehost_source_paths = set(rehost_source_files)
