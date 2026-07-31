@@ -6,8 +6,8 @@ from typing import Any, Dict, List, Optional, Tuple
 import os
 import tempfile
 
-from legacy.standalone_algorithm.parser import parse_source
-from legacy.standalone_algorithm.transformation_matching import build_non_function_regions, find_matches_in_regions, find_matching_function
+from parser import parse_source
+from transformation_matching import build_non_function_regions, find_matches_in_regions, find_matching_function
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 
@@ -19,6 +19,9 @@ GENERATED_REHOST_DIR = (PROJECT_ROOT / "generated_rehost")
 
 APPLICATION_REPORT_FILE = (PROJECT_ROOT / "application_report.txt")
 
+def _line_number_for_offset(text: str, offset: int) -> int:
+    # Return the 1-based line number containing the offset.
+    return text.count("\n", 0, offset) + 1
 
 def prepare_generated_project(source_directory: Path, output_directory: Path) -> None:
     # Create a fresh generated project from new_original.
@@ -220,6 +223,138 @@ def apply_insertion_transformation(source_text: str, transformation: Dict[str, A
                 ],
             }
         )
+        return updated_source, result
+
+    # File-level insertions may use a neighboring function as a stable insertion boundary.
+    if position in {"before_function", "after_function"}:
+        if transformation.get("scope") != "global":
+            result["reason"] = (f"The {position} position can only be used with global-scope transformations.")
+            return source_text, result
+
+        function_anchor = transformation.get("function_anchor")
+
+        if not isinstance(function_anchor, dict):
+            result["reason"] = ("The function-boundary insertion does not contain a valid function_anchor object.")
+            return source_text, result
+
+        function_name = function_anchor.get("name")
+        function_signature = function_anchor.get("signature")
+
+        if (
+            not isinstance(function_name, str)
+            or not function_name.strip()
+            or not isinstance(function_signature, str)
+            or not function_signature.strip()
+        ):
+            result["reason"] = ("The primary function anchor does not contain a valid name and signature.")
+            return source_text, result
+
+        parse_result = parse_source(source_text)
+        functions = parse_result["functions"]
+
+        matching_function, primary_error = find_matching_function(functions,function_name,function_signature,)
+
+        result["match_count"] = (1 if matching_function is not None else 0)
+
+        used_position = position
+        used_function_anchor = function_anchor
+        used_fallback = False
+
+        if matching_function is None:
+            fallback_position = transformation.get("fallback_position")
+            fallback_function_anchor = transformation.get("fallback_function_anchor")
+
+            fallback_is_valid = (
+                fallback_position
+                in {"before_function", "after_function"}
+                and isinstance(fallback_function_anchor, dict)
+                and isinstance(
+                    fallback_function_anchor.get("name"),
+                    str,
+                )
+                and fallback_function_anchor["name"].strip()
+                and isinstance(
+                    fallback_function_anchor.get("signature"),
+                    str,
+                )
+                and fallback_function_anchor["signature"].strip()
+            )
+
+            if not fallback_is_valid:
+                result["reason"] = (
+                    "The primary function anchor could not be "
+                    f"verified: {primary_error or 'Unknown error'} No valid fallback function anchor is available.")
+                return source_text, result
+
+            matching_function, fallback_error = (
+                find_matching_function(
+                    functions,
+                    fallback_function_anchor["name"],
+                    fallback_function_anchor["signature"],
+                )
+            )
+
+            result["fallback_match_count"] = (
+                1 if matching_function is not None else 0
+            )
+
+            if matching_function is None:
+                result["reason"] = (
+                    "Neither function boundary could be verified. "
+                    "Primary: "
+                    f"{primary_error or 'Unknown error'} "
+                    "Fallback: "
+                    f"{fallback_error or 'Unknown error'}"
+                )
+                return source_text, result
+
+            used_position = fallback_position
+            used_function_anchor = fallback_function_anchor
+            used_fallback = True
+
+        if used_position == "before_function":
+            insertion_index = matching_function["start"]
+        else:
+            insertion_index = matching_function["end"]
+
+        updated_source, inserted_start, inserted_end = (
+            insert_text_at_position(
+                source_text=source_text,
+                insertion_index=insertion_index,
+                content=content,
+            )
+        )
+
+        result.update(
+            {
+                "result": "APPLIED",
+                "reason": (
+                    "The primary function anchor could not be "
+                    "verified, so the fallback function boundary "
+                    f"was used: {used_function_anchor['name']}."
+                    if used_fallback
+                    else
+                    "The content was inserted relative to the "
+                    "verified function boundary: "
+                    f"{used_function_anchor['name']}."
+                ),
+                "used_position": used_position,
+                "used_function_anchor": used_function_anchor,
+                "used_fallback": used_fallback,
+                "applied_count": 1,
+                "ranges": [
+                    {
+                        "start": inserted_start,
+                        "end": inserted_end,
+                    }
+                ],
+                "opening_line": _line_number_for_offset(
+                    source_text,
+                    inserted_start,
+                ),
+            }
+        )
+
         return updated_source, result
 
     # Anchor-based insertions require exactly one anchor match.
@@ -603,7 +738,7 @@ def load_transformations(transformations_file: Path) -> Tuple[List[Dict[str, Any
         # Validate insertion-specific fields.
         position = require_non_empty_string(transformation.get("position"),"position",index,)
 
-        if position not in {"before","after","function_start","function_end",}:
+        if position not in {"before","after","function_start","function_end","before_function","after_function",}:
             raise ValueError(f"Transformation {index} contains an unsupported insertion position: {position}")
 
         require_non_empty_string(transformation.get("content"),"content",index,)
@@ -615,18 +750,62 @@ def load_transformations(transformations_file: Path) -> Tuple[List[Dict[str, Any
         if position in {"before", "after"}:
             require_non_empty_string(transformation.get("anchor"),"anchor",index,)
 
-        fallback_position = transformation.get("fallback_position")
-        fallback_anchor = transformation.get("fallback_anchor")
+        if position in {"before_function","after_function",}:
+            if scope != "global":
+                raise ValueError(f"Transformation {index} uses the {position} position, which requires global scope.")
 
-        # Fallback position and anchor must either both exist or both be absent.
-        if (fallback_position is None) != (fallback_anchor is None):
-            raise ValueError(f"Transformation {index} must contain both fallback_position and fallback_anchor.")
+            function_anchor = transformation.get("function_anchor")
 
-        if fallback_position is not None:
-            if fallback_position not in {"before", "after"}:
-                raise ValueError(f"Transformation {index} contains an unsupported fallback position: {fallback_position}")
+            if not isinstance(function_anchor, dict):
+                raise ValueError(f"Transformation {index} does not contain a valid function_anchor object.")
 
-            require_non_empty_string(fallback_anchor,"fallback_anchor",index,)
+            require_non_empty_string(function_anchor.get("name"),"function_anchor.name",index,)
+            require_non_empty_string(function_anchor.get("signature"),"function_anchor.signature",index,)
+
+        # Text-anchor insertions may use another text anchor as fallback.
+        if position in {"before", "after"}:
+            fallback_position = transformation.get("fallback_position")
+            fallback_anchor = transformation.get("fallback_anchor")
+
+            # Both fallback fields must exist together or both be absent.
+            if (fallback_position is None) != (fallback_anchor is None):
+                raise ValueError(f"Transformation {index} must contain both fallback_position and fallback_anchor.")
+
+            if fallback_position is not None:
+                if fallback_position not in {"before", "after"}:
+                    raise ValueError(f"Transformation {index} contains an unsupported text-anchor fallback position: {fallback_position}")
+
+                require_non_empty_string(fallback_anchor,"fallback_anchor",index,)
+
+        # Function-boundary insertions may use another function boundary as fallback.
+        elif position in {"before_function", "after_function"}:
+            fallback_position = transformation.get("fallback_position")
+            fallback_function_anchor = transformation.get(
+                "fallback_function_anchor"
+            )
+
+            if ((fallback_position is None)!= (fallback_function_anchor is None)):
+                raise ValueError(f"Transformation {index} must contain both fallback_position and fallback_function_anchor.")
+
+            if fallback_position is not None:
+                if fallback_position not in {"before_function","after_function",}:
+                    raise ValueError(
+                        f"Transformation {index} contains an unsupported function-boundary fallback position: "
+                        f"{fallback_position}")
+
+                if not isinstance(fallback_function_anchor, dict):
+                    raise ValueError(f"Transformation {index} does not contain a valid fallback_function_anchor object.")
+
+                require_non_empty_string(
+                    fallback_function_anchor.get("name"),
+                    "fallback_function_anchor.name",
+                    index,
+                )
+                require_non_empty_string(
+                    fallback_function_anchor.get("signature"),
+                    "fallback_function_anchor.signature",
+                    index,
+                )
         
     # support_files is optional so older transformation JSON files containing only transformations remain valid.
     support_files = transformation_data.get("support_files", [])
@@ -644,10 +823,7 @@ def load_transformations(transformations_file: Path) -> Tuple[List[Dict[str, Any
 
         if missing_fields:
             missing_text = ", ".join(sorted(missing_fields))
-            raise ValueError(
-                f"Support file {index} is missing "
-                f"required fields: {missing_text}"
-            )
+            raise ValueError(f"Support file {index} is missing required fields: {missing_text}")
 
         path = support_file.get("path")
         content = support_file.get("content")
@@ -839,7 +1015,7 @@ def write_source_atomically(output_file: Path, source_text: str, source_encoding
 def mark_unwritten_results_as_skipped(file_results: List[Dict[str, Any]], reason: str,) -> None:
     # Results calculated from an in-memory source are not considered successful when the final file cannot be written.
     for result in file_results:
-        if result.get("result") not in {"APPLIED", "ALREADY_APPLIED",}:
+        if result.get("result") not in {"APPLIED"}:
             continue
 
         result.update(
