@@ -4,10 +4,10 @@ import type { ResultStatus } from "../../types/api";
 
 const props = defineProps<{ status: ResultStatus }>();
 
-// Deliberately only three keys - TypeScript will error at build time if
-// ResultStatus ever grows a fourth value this map doesn't cover, rather
-// than silently rendering nothing for it.
+// TypeScript will report an error if ResultStatus gains a value
+// that is not represented in this map.
 const styles: Record<ResultStatus, string> = {
+  Created: "bg-green-100 text-green-800",
   Applied: "bg-green-100 text-green-800",
   "Already Applied": "bg-teal-100 text-teal-800",
   Skipped: "bg-gray-100 text-gray-700",

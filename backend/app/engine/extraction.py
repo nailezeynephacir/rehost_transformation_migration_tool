@@ -61,9 +61,9 @@ class ExtractionResultItem:
 
 @dataclass
 class ExtractionSummary:
-    applied: int
+    created: int
     skipped: int
-    already_applied: int = 0
+    support_files_stored: int
 
 
 @dataclass
@@ -1158,7 +1158,7 @@ def _to_extraction_result_item(entry: Dict[str, Any]) -> ExtractionResultItem:
         file=entry["file"],
         scope=entry.get("scope"),
         function_name=entry.get("function_name"),
-        status="Applied" if entry["result"] == "CREATED" else "Skipped",
+        status="Created" if entry["result"] == "CREATED" else "Skipped",
         matched_macro=", ".join(matched_macros) if matched_macros else None,
         opening_line=entry.get("opening_line_number"),
         reason=entry["reason"],
@@ -1167,10 +1167,21 @@ def _to_extraction_result_item(entry: Dict[str, Any]) -> ExtractionResultItem:
     )
 
 
-def _build_extraction_summary(report_entries: List[Dict[str, Any]]) -> ExtractionSummary:
-    applied = sum(1 for entry in report_entries if entry["result"] == "CREATED")
-    skipped = sum(1 for entry in report_entries if entry["result"] == "SKIPPED")
-    return ExtractionSummary(applied=applied, skipped=skipped, already_applied=0)
+def _build_extraction_summary(report_entries: List[Dict[str, Any]],support_file_count: int,) -> ExtractionSummary:
+    created = sum(
+        1 for entry in report_entries
+        if entry["result"] == "CREATED"
+    )
+    skipped = sum(
+        1 for entry in report_entries
+        if entry["result"] == "SKIPPED"
+    )
+
+    return ExtractionSummary(
+        created=created,
+        skipped=skipped,
+        support_files_stored=support_file_count,
+    )
 
 
 def extract_transformations(
@@ -1285,5 +1296,8 @@ def extract_transformations(
 
     return ExtractionResult(
         results=[_to_extraction_result_item(entry) for entry in all_report_entries],
-        summary=_build_extraction_summary(all_report_entries),
+        summary=_build_extraction_summary(
+            all_report_entries,
+            support_file_count=len(all_support_files),
+        ),
     )

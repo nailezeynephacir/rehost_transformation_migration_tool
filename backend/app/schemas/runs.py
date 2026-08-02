@@ -6,7 +6,12 @@ from pydantic import BaseModel
 # three statuses (not four), "run" not "job", async not blocking.
 RunStatus = Literal["queued", "running", "completed", "failed"]
 Operation = Literal["extract", "apply"]
-ResultStatus = Literal["Applied", "Skipped", "Already Applied"]
+ResultStatus = Literal[
+    "Created",
+    "Applied",
+    "Skipped",
+    "Already Applied",
+]
 
 
 class RunCreatedResponse(BaseModel):
@@ -14,10 +19,19 @@ class RunCreatedResponse(BaseModel):
     status: Literal["queued"] = "queued"
 
 
-class RunSummary(BaseModel):
+class ExtractionSummary(BaseModel):
+    created: int
+    skipped: int
+    support_files_stored: int
+
+
+class ApplicationSummary(BaseModel):
     applied: int
     skipped: int
     already_applied: int
+
+
+RunSummary = Union[ExtractionSummary, ApplicationSummary]
 
 
 class TransformationResult(BaseModel):

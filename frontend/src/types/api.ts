@@ -4,18 +4,30 @@
 
 export type RunStatus = "queued" | "running" | "completed" | "failed";
 export type Operation = "extract" | "apply";
-export type ResultStatus = "Applied" | "Skipped" | "Already Applied";
+export type ResultStatus =
+  | "Created"
+  | "Applied"
+  | "Skipped"
+  | "Already Applied";
 
 export interface RunCreatedResponse {
   run_id: string;
   status: "queued";
 }
 
-export interface RunSummary {
+export interface ExtractionSummary {
+  created: number;
+  skipped: number;
+  support_files_stored: number;
+}
+
+export interface ApplicationSummary {
   applied: number;
   skipped: number;
   already_applied: number;
 }
+
+export type RunSummary = ExtractionSummary | ApplicationSummary;
 
 export interface TransformationResult {
   transformation_id: string | null;
@@ -54,16 +66,30 @@ export interface RunFailedResponse {
   error: string;
 }
 
-export interface RunCompletedResponse {
+interface RunCompletedResponseBase {
   run_id: string;
-  operation: Operation;
   status: "completed";
   completed_at: string;
   target_macros: string[] | null;
-  summary: RunSummary;
   results: TransformationResult[];
   artifacts: Artifact[];
 }
+
+export interface ExtractionCompletedResponse
+  extends RunCompletedResponseBase {
+  operation: "extract";
+  summary: ExtractionSummary;
+}
+
+export interface ApplicationCompletedResponse
+  extends RunCompletedResponseBase {
+  operation: "apply";
+  summary: ApplicationSummary;
+}
+
+export type RunCompletedResponse =
+  | ExtractionCompletedResponse
+  | ApplicationCompletedResponse;
 
 // The response shape genuinely varies by status - a union, not one loose
 // type with everything optional, so callers are forced to narrow by
