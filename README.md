@@ -2,6 +2,43 @@
 
 A web-based tool for transferring previously implemented rehosting changes from an older version of a source project to a newer version.
 
+## One-click startup on Windows
+
+Requirements:
+
+- Python 3.11 or newer
+- Node.js LTS (includes npm)
+
+Double-click `start.bat` in the project root.
+
+On the first run, it automatically creates a Python virtual environment and
+installs the backend and frontend dependencies. It then opens:
+
+- Backend: <http://localhost:8000>
+- Frontend: <http://localhost:5173>
+
+Later runs skip installation and open the application directly. Keep the two
+terminal windows open while using the application. Close them to stop it.
+
+If dependencies change or installation needs to be repaired, double-click
+`setup.bat`, then run `start.bat` again.
+
+## Manual startup
+
+Backend:
+
+```powershell
+cd backend
+.\.venv\Scripts\python.exe -m uvicorn app.main:app --reload
+```
+
+Frontend (in a second terminal):
+
+```powershell
+cd frontend
+npm run dev
+```
+
 ## Why This Project Exists
 
 Embedded software frequently depends on hardware-specific components such as sensors, processor registers, communication interfaces, vendor libraries, and timing functions. Rehosting adapts this software to run in a host environment, such as Windows or Linux, so that its application logic can be tested without requiring the original target hardware.
@@ -249,105 +286,6 @@ python --version
 node --version
 npm --version
 ```
-
-## Installation and Local Development
-
-Download or clone the repository, then open two terminals in the project root.
-
-One terminal will run the backend, and the other will run the frontend.
-
-## Running the Backend
-
-### Windows PowerShell
-
-From the project root:
-
-```powershell
-cd backend
-
-python -m venv .venv
-.\.venv\Scripts\Activate.ps1
-
-python -m pip install -r ..\requirements.txt
-python -m uvicorn app.main:app --reload
-```
-
-If PowerShell prevents virtual-environment activation, run:
-
-```powershell
-Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
-.\.venv\Scripts\Activate.ps1
-```
-
-### macOS or Linux
-
-From the project root:
-
-```bash
-cd backend
-
-python3 -m venv .venv
-source .venv/bin/activate
-
-python -m pip install -r ../requirements.txt
-python -m uvicorn app.main:app --reload
-```
-
-When the backend starts successfully, it will be available at:
-
-- API: `http://127.0.0.1:8000`
-- Swagger UI: `http://127.0.0.1:8000/docs`
-- ReDoc: `http://127.0.0.1:8000/redoc`
-- Health check: `http://127.0.0.1:8000/health`
-
-A successful health-check response looks like:
-
-```json
-{
-  "status": "ok"
-}
-```
-
-## Running the Frontend
-
-Open a second terminal and run:
-
-```bash
-cd frontend
-npm ci
-npm run dev
-```
-
-If `npm ci` cannot be used because the lock file is unavailable or incompatible, use:
-
-```bash
-npm install
-npm run dev
-```
-
-The frontend will normally be available at:
-
-```text
-http://localhost:5173
-```
-
-Open this address in a web browser.
-
-## Frontend API Configuration
-
-The frontend uses the following backend address by default:
-
-```text
-http://localhost:8000
-```
-
-To use a different backend address, create a file named `.env.local` inside the `frontend` directory:
-
-```env
-VITE_API_BASE_URL=http://localhost:8000
-```
-
-Restart the frontend development server after changing this file.
 
 ## Using the Web Interface
 

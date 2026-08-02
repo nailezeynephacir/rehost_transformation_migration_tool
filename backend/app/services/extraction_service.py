@@ -84,9 +84,9 @@ async def _process_extraction(run_id: str, run_dir, target_macros: List[str]) ->
         ]
 
         summary = {
-            "applied": engine_result.summary.applied,
+            "created": engine_result.summary.created,
             "skipped": engine_result.summary.skipped,
-            "already_applied": engine_result.summary.already_applied,
+            "support_files_stored": engine_result.summary.support_files_stored,
         }
 
         artifacts = [
